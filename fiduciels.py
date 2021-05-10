@@ -1,5 +1,6 @@
 import numpy as np
 from connect import *
+from scipy import ndimage as ndi
 from skimage.feature import peak_local_max
 from scipy.ndimage import label, generate_binary_structure
 import SimpleITK as sitk
@@ -53,12 +54,10 @@ class Ct_image(Patient):
                           row_direction_x, row_direction_y, row_direction_z,
                           slice_direction_x, slice_direction_y, slice_direction_z)
 
-
         # Image Corners
         self.x_corner = self.case.Examinations[self.exam_name].Series[0].ImageStack.Corner.x
         self.y_corner = self.case.Examinations[self.exam_name].Series[0].ImageStack.Corner.y
         self.z_corner = self.case.Examinations[self.exam_name].Series[0].ImageStack.Corner.z
-
         self.origin = (self.x_corner, self.y_corner, self.z_corner)
 
         # Pixel size
@@ -72,7 +71,9 @@ class Ct_image(Patient):
         self.slope = self.case.Examinations[self.exam_name].Series[0].ImageStack.ConversionParameters.RescaleSlope
 
         # Image Creation
-        self.image_ct = self.get_itk_image(to_save=False)
+        # BE CAREFUL : the first axis is inf/sup in numpy format
+        self.image_itk = None
+        self.image_npy = None
 
     def get_itk_image(self, to_save=False):
         """Return a simpleITK image object"""
@@ -80,10 +81,8 @@ class Ct_image(Patient):
         result = np.zeros(self.n_voxels)
         b1 = self.data[0:-1:2]
         b2 = self.data[1::2]
-
         result[b2 > 128] = b1[b2 > 128] + 256 * (b2[b2 > 128] - 128) - 65536
         result[b2 <= 128] = b1[b2 <= 128] + 256 * b2[b2 <= 128]
-
         result = self.slope * result + self.intercept
         result = np.reshape(result, [self.depth, self.columns, self.rows])
 
@@ -104,7 +103,6 @@ class Ct_image(Patient):
         print(itk_image.GetOrigin())
         print(itk_image.GetSpacing())
         print(itk_image.GetDirection())
-
         return itk_image
 
 
@@ -136,93 +134,93 @@ class ROI(Ct_image):
         return bounds
 
     def look_for_fidu(self, roi_name="Foie"):
-        # todo: repair the conversion between position to index to be able to use the bounds
         if self.check_roi(roi_name) and self.has_contour(roi_name):
+            # Image Creation
+            # BE CAREFUL : the first axis is inf/sup in numpy format
+            self.image_itk = self.get_itk_image(to_save=False)
+            self.image_npy = sitk.GetArrayFromImage(self.image_itk)
+            # looking for limits of the roi in which the fiducials are
             bounds = self.get_bounding_box(roi_name)
-            limits = [self.image_ct.TransformPhysicalPointToIndex([i[0], i[1], i[2]]) for i in bounds]
-            print('Limits :')
-            print(limits)
-            # self.find_local_max()
+            limits = [self.image_itk.TransformPhysicalPointToIndex([i[0], i[1], i[2]]) for i in bounds]
+            print(f"limits : {limits}")
+
+            # creating a copy of the numpy array containing the image
+            image_to_process = np.copy(self.image_npy)
+
+            # thresholding
+            maximum = np.amax(self.image_npy)
+            print(f'max = {maximum}')
+            image_to_process[self.image_npy < 0.7 * maximum] = 0
+
+            # removing values outside the roi bounds
+            # z direction
+            image_to_process[0:limits[0][2], :, :] = 0
+            image_to_process[limits[1][2]:, :, :] = 0
+            # x direction
+            image_to_process[:, 0:limits[0][0], :] = 0
+            image_to_process[:, limits[1][0]:, :] = 0
+            # y direction
+            image_to_process[:, :, 0:limits[0][1]] = 0
+            image_to_process[:, :, limits[1][1]:] = 0
+
+            position = self.find_local_max(image_to_process)
+            self.poi_creation(position)
         else:
             print("Please, make a contour for the liver")
 
-        self.get_index_from_physical_point(self.origin)
 
-    def get_index_from_physical_point(self, physical_point):
-        (x, y, z) = physical_point
-        (i, j, k) = self.image_ct.TransformPhysicalPointToContinuousIndex((x, y, z))
-        print(f"x : {x}, y : {y}, z : {z} correspond to point {i / 10} , {j / 10}, {k / 10}")
-        return i, j, k
+    def find_local_max(self, image_to_process):
 
-    # def get_physical_point_from_index(self, column, row, slice):
-    #     [i, j, k] = self.image_ct.TransformPhysicalPointToContinuousIndex([x, y, z])
-    #     print(f"x : {x}, y : {y}, z : {z} correspond to point {i} , {j}, {k}")
-    #     return
-    #
-    # def find_local_max(self):
-    #     # thresholding
-    #     self.image_to_process[self.image_to_process < 2000] = 0
-    #     self.image_to_process[self.image_to_process > 2000] = 1
-    #
-    #     coordinates = peak_local_max(self.image_to_process)
-    #
-    #     s = np.ones([3, 3, 3])
-    #     labeled_array, num_features = label(self.image_to_process, structure = s)
-    #     print("There are " + str(num_features) + " fiducials")
+        # image_max is the dilation of im with a 10x10 structuring element
+        # It is used within peak_local_max function
+        image_max = ndi.maximum_filter(image_to_process, size=5, mode='constant')
+
+        # Comparison between image_max and im to find the coordinates of local maxima
+        footprint = np.ones([5, 5, 5])
+        coordinates = peak_local_max(image_to_process, min_distance=5, footprint=footprint)
+
+        positions = []
+        for coord in coordinates:
+            # conversion of coordinates into int values
+            coord = tuple(map(float, coord))
+            # replacing z by x
+            # todo: check if +1 is needed for I/S index
+            coord = [coord[1], coord[2], coord[0]]
+            print(coord)
+            position = self.image_itk.TransformContinuousIndexToPhysicalPoint(coord)
+            print(position)
+            positions.append(position)
+        return positions
+
+    def poi_creation(self, coordinates):
+        for i, coords in enumerate(coordinates):
+            name = "Fidu " + str(i + 1)
+            try:
+                # POI list creation in RS
+                self.case.PatientModel.CreatePoi(Name=name, Color="Yellow", VisualizationDiameter=1,
+                                                 Type="Undefined")
+            except:
+                # todo : what if the points are already there?
+                print('error')
+            # POI assignation
+            x, z, y = coords
+            self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
+                'x': x , 'y': z , 'z': y }
 
 
 if __name__ == '__main__':
     # ----- Patient -----
     # Creating patient object
     patient = Patient()
-
     # Creating a list containing all the examination names
     examinations = patient.get_examination_list()
     # exam is one element from the list above
-    # exam = examinations[0]
-    exam = '2021.04.08  50% Contourage Foie'
 
-    # ----- Ct -----
-    # ct = Ct_image(exam)
+    for exam in examinations:
+        # exam = examinations[0]
+        # exam = '4D  60%'
 
-    # ----- Roi -----
-    roi = ROI(exam)
-    roi.look_for_fidu()
+        # ----- Roi -----
+        roi = ROI(exam)
+        roi.look_for_fidu()
 
-    # ----- Fidu -----
-
-    # foie = roi.has_contour('Foie')
-    # bounding = roi.get_bounding_box('Foie')
-    #
-    # print(ct.get_index_from_position(-199.609375, -419.109375, -149.5))
-    # print(ct.get_position_from_index(0, 0, 0))
-    #
-    # # path = os.path.dirname(os.path.realpath(__file__))
-    # # print(path)
-    # # with open(os.path.join(path, 'data.npy'), 'wb') as f:
-    # #     np.save(f, image_ct)
-
-# #GARBAGE PART
-# # POI creation
-# # =============================================================================
-#
-# name = []
-#
-# for i in range(n_unique_POI):
-#     name.append("Fidu " + str(i + 1))
-#     case.PatientModel.CreatePoi(Name=name[i], Color="Yellow", VisualizationDiameter=1, Type="Undefined")
-#
-# # =============================================================================
-# # POI update for each exam
-# # =============================================================================
-#
-# exam_0 = coordfidus[0][3]
-#
-# for i in range(n_fidus):
-#     fidu = coordfidus[i]
-#
-#     x = fidu[0];
-#     y = fidu[1];
-#     z = fidu[2];
-#     exam = fidu[3]
-#     case.PatientModel.StructureSets[exam].PoiGeometries[name[i % n_unique_POI]].Point = {'x': x, 'y': y, 'z': z}
