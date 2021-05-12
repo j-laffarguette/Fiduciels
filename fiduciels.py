@@ -3,6 +3,7 @@ from connect import *
 from scipy import ndimage as ndi
 from skimage.feature import peak_local_max
 from scipy.ndimage import label, generate_binary_structure
+from skimage.draw import polygon2mask
 import SimpleITK as sitk
 import os
 
@@ -107,43 +108,98 @@ class Ct_image(Patient):
 
 
 class ROI(Ct_image):
-    def __init__(self, exam_name):
+    def __init__(self, exam_name, roi_name):
         super().__init__(exam_name)
         self.roi_list = self.get_roi_list()
         self.exam_name = exam_name
+        self.roi_name = roi_name
+        self.roi_mask_npy = None
 
     def get_roi_list(self):
         rois = self.case.PatientModel.RegionsOfInterest
         return [roi.Name for roi in rois]
 
-    def check_roi(self, roi_name_test):
+    def check_roi(self, roi_name_to_test=None):
+        # this method checks if a toi exists
+        if roi_name_to_test is None:
+            roi_name_to_test = self.roi_name
         roi_check = False
         rois = self.case.PatientModel.RegionsOfInterest
         for roi in rois:
-            if roi.Name == roi_name_test:
+            if roi.Name == roi_name_to_test:
                 roi_check = True
         return roi_check
 
-    def has_contour(self, roi_name_test):
+    def has_contour(self, roi_name_to_test=None):
         """ Check if a structure is empty or not"""
-        return self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[roi_name_test].HasContours()
+        if roi_name_to_test is None:
+            roi_name_to_test = self.roi_name
+        return self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[roi_name_to_test].HasContours()
 
-    def get_bounding_box(self, roi_name):
+    def get_bounding_box(self, roi_name=None):
+        # get coordinates of two point that create a box around the roi_name
+        if roi_name is None:
+            roi_name = self.roi_name
         bound = self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[roi_name].GetBoundingBox()
         bounds = [[bound[0]['x'], bound[0]['y'], bound[0]['z']], [bound[1]['x'], bound[1]['y'], bound[1]['z']]]
         return bounds
 
-    def look_for_fidu(self, roi_name="Foie"):
+    def get_mask_from_roi(self, roi_name=None):
+
+        if roi_name is None:
+            roi_name = self.roi_name
+        # This method need the creation of the itk image if not already done
+        if self.image_itk is None:
+            self.image_itk = self.get_itk_image(to_save=False)
+            self.image_npy = sitk.GetArrayFromImage(self.image_itk)
+
+        try:
+            self.check_roi(roi_name)
+            self.has_contour(roi_name)
+        except:
+            raise Exception("This ROI does not exist")
+
+        print(f"----> Starting mask creation for {roi_name} on {self.exam_name} ...")
+        # Creation of an empty array that has the same size as the original image
+        mask = np.zeros_like(self.image_npy)
+
+        # sl is a list of all the dots for one single slice
+        for sl in self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[roi_name].PrimaryShape.Contours:
+            # for each slice, one creates an array that will contain all the dots coordinates.
+            # This array is initialized by using np.ones like this -> coordinates = [[1,1,1] , [1,1,1] ,...]
+            # it will be filled with coordinates like this -> [[x1,y1,z1],[x2,y2,z2], ....]
+
+            n_dots = len(sl)
+            coordinates = np.ones([n_dots, 3])
+
+            slice_number = 0
+            # dot contains three coordinates (in mm) for one dot of the contour. The three coordinates are needed
+            # for the conversion from positions in mm to index
+            for index, dot in enumerate(sl):
+                coordinates[index] = self.image_itk.TransformPhysicalPointToIndex([dot.x, dot.y, dot.z])
+                if index == 0:
+                    slice_number = coordinates[index][2]
+            # polygon2mask creates a mask only for 2D images. So ones needs to suppress the third coordinate (number
+            # of the slice)
+            image_shape = [self.columns, self.rows]
+            coordinates_xy = [c[0:2] for c in coordinates]
+            temp_mask = polygon2mask(image_shape, coordinates_xy)
+            print('mask creation ok!')
+
+            mask[int(slice_number), :, :] = temp_mask
+        mask.astype(int)
+        self.roi_mask_npy = mask
+        return mask
+
+    def look_for_fidu(self, roi_name=None):
+        if roi_name is None:
+            roi_name = self.roi_name
+
         if self.check_roi(roi_name) and self.has_contour(roi_name):
             # Image Creation
             # BE CAREFUL : the first axis is inf/sup in numpy format
             self.image_itk = self.get_itk_image(to_save=False)
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
-
-            # looking for limits of the roi in which the fiducials are
-            bounds = self.get_bounding_box(roi_name)
-            limits = [self.image_itk.TransformPhysicalPointToIndex([i[0], i[1], i[2]]) for i in bounds]
-            print(f"limits : {limits}")
 
             # creating a copy of the numpy array containing the image
             image_to_process = np.copy(self.image_npy)
@@ -153,21 +209,35 @@ class ROI(Ct_image):
             print(f'max = {maximum}')
             image_to_process[self.image_npy < 0.7 * maximum] = 0
 
-            # removing values outside the roi bounds
-            # z direction
-            image_to_process[0:limits[0][2], :, :] = 0
-            image_to_process[limits[1][2]:, :, :] = 0
-            # x direction
-            image_to_process[:, 0:limits[0][0], :] = 0
-            image_to_process[:, limits[1][0]:, :] = 0
-            # y direction
-            image_to_process[:, :, 0:limits[0][1]] = 0
-            image_to_process[:, :, limits[1][1]:] = 0
+            # Applying mask using bounding box
+            if False:
+                # looking for limits of the roi in which the fiducials are
+                bounds = self.get_bounding_box(roi_name)
+                limits = [self.image_itk.TransformPhysicalPointToIndex([i[0], i[1], i[2]]) for i in bounds]
+                print(f"limits : {limits}")
 
+                # removing values outside the roi bounds
+                # z direction
+                image_to_process[0:limits[0][2], :, :] = 0
+                image_to_process[limits[1][2]:, :, :] = 0
+                # x direction
+                image_to_process[:, 0:limits[0][0], :] = 0
+                image_to_process[:, limits[1][0]:, :] = 0
+                # y direction
+                image_to_process[:, :, 0:limits[0][1]] = 0
+                image_to_process[:, :, limits[1][1]:] = 0
+
+            # Applying mask using structure:
+            self.get_mask_from_roi()
+            image_to_process = image_to_process * self.roi_mask_npy
+
+            # Seeking the fiducials
             position = self.find_local_max(image_to_process)
+
+            # creation of POIs in RS
             self.poi_creation(position)
         else:
-            raise("Please, make a contour for the liver")
+            print(f"Please, make a contour for the roi {roi_name}")
 
     def find_local_max(self, image_to_process):
         # todo: mettre s dans le init
@@ -221,7 +291,7 @@ if __name__ == '__main__':
     patient = Patient()
     # Creating a list containing all the examination names
     examinations = patient.get_examination_list()
-    roi =
+
     # exam is one element from the list above
 
     loop = False
@@ -229,16 +299,10 @@ if __name__ == '__main__':
     if loop:
         for exam in examinations:
             # ----- Roi -----
-            roi = ROI(exam)
+            roi = ROI(exam, 'Foie')
             roi.look_for_fidu()
     else:
         exam = '4D  60%'
         # ----- Roi -----
-        roi = ROI(exam)
+        roi = ROI(exam, 'gtv')
         roi.look_for_fidu()
-
-
-
-
-
-
