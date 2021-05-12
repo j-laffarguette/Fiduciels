@@ -139,6 +139,7 @@ class ROI(Ct_image):
             # BE CAREFUL : the first axis is inf/sup in numpy format
             self.image_itk = self.get_itk_image(to_save=False)
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
+
             # looking for limits of the roi in which the fiducials are
             bounds = self.get_bounding_box(roi_name)
             limits = [self.image_itk.TransformPhysicalPointToIndex([i[0], i[1], i[2]]) for i in bounds]
@@ -166,30 +167,36 @@ class ROI(Ct_image):
             position = self.find_local_max(image_to_process)
             self.poi_creation(position)
         else:
-            print("Please, make a contour for the liver")
-
+            raise("Please, make a contour for the liver")
 
     def find_local_max(self, image_to_process):
+        # todo: mettre s dans le init
 
+        # size parameter
+        s = 10
         # image_max is the dilation of im with a 10x10 structuring element
         # It is used within peak_local_max function
-        image_max = ndi.maximum_filter(image_to_process, size=5, mode='constant')
+        image_max = ndi.maximum_filter(image_to_process, size=s, mode='constant')
 
         # Comparison between image_max and im to find the coordinates of local maxima
-        footprint = np.ones([5, 5, 5])
-        coordinates = peak_local_max(image_to_process, min_distance=5, footprint=footprint)
+        footprint = np.ones([s, s, s])
+        coordinates = peak_local_max(image_to_process, min_distance=s, footprint=footprint)
 
         positions = []
         for coord in coordinates:
             # conversion of coordinates into int values
             coord = tuple(map(float, coord))
             # replacing z by x
-            # todo: check if +1 is needed for I/S index
+            # todo: commentaire
             coord = [coord[1], coord[2], coord[0]]
             print(coord)
             position = self.image_itk.TransformContinuousIndexToPhysicalPoint(coord)
             print(position)
             positions.append(position)
+
+        # sorting coordinates by z
+        positions = sorted(positions, key=lambda x: x[2])
+
         return positions
 
     def poi_creation(self, coordinates):
@@ -205,7 +212,7 @@ class ROI(Ct_image):
             # POI assignation
             x, z, y = coords
             self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
-                'x': x , 'y': z , 'z': y }
+                'x': x, 'y': z, 'z': y}
 
 
 if __name__ == '__main__':
@@ -214,13 +221,24 @@ if __name__ == '__main__':
     patient = Patient()
     # Creating a list containing all the examination names
     examinations = patient.get_examination_list()
+    roi =
     # exam is one element from the list above
 
-    for exam in examinations:
-        # exam = examinations[0]
-        # exam = '4D  60%'
+    loop = False
 
+    if loop:
+        for exam in examinations:
+            # ----- Roi -----
+            roi = ROI(exam)
+            roi.look_for_fidu()
+    else:
+        exam = '4D  60%'
         # ----- Roi -----
         roi = ROI(exam)
         roi.look_for_fidu()
+
+
+
+
+
 
