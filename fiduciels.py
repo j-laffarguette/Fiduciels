@@ -8,21 +8,49 @@ import SimpleITK as sitk
 import os
 
 
+def check_roi(case, roi_to_check):
+    # this method checks if a toi exists
+    roi_check = False
+    rois = case.PatientModel.RegionsOfInterest
+    for roi in rois:
+        if roi.Name == roi_to_check:
+            roi_check = True
+    return roi_check
+
+
+def has_contour(case, examination, roi_to_check):
+    """ Check if a structure is empty or not"""
+    return case.PatientModel.StructureSets[examination].RoiGeometries[roi_to_check].HasContours()
+
+
+def get_bounding_box(case, examination, roi):
+    # get coordinates of two point that create a box around the roi_name
+    bound = case.PatientModel.StructureSets[examination].RoiGeometries[roi].GetBoundingBox()
+    bounds = [[bound[0]['x'], bound[0]['y'], bound[0]['z']], [bound[1]['x'], bound[1]['y'], bound[1]['z']]]
+    return bounds
+
+
 class Patient:
     def __init__(self):
         self.case = get_current("Case")
         self.examination = get_current("Examination")
         self.patient = get_current("Patient")
         self.examination_names = []
+        self.roi_list = []
 
     def get_examination_list(self):
         for i in self.case.Examinations:
             self.examination_names.append(i.Name)
         return self.examination_names
 
+    def get_roi_list(self):
+        rois = self.case.PatientModel.RegionsOfInterest
+        self.roi_list = [roi.Name for roi in rois]
+        return self.roi_list
 
-class Ct_image(Patient):
-    def __init__(self, exam_name):
+
+class Image(Patient):
+    def __init__(self, exam_name, roi_name=None):
         super().__init__()
         self.exam_name = exam_name
         self.data = self.case.Examinations[exam_name].Series[0].ImageStack.PixelData
@@ -76,6 +104,10 @@ class Ct_image(Patient):
         self.image_itk = None
         self.image_npy = None
 
+        # Roi
+        self.roi_name = roi_name
+        self.roi_mask_npy = None
+
     def get_itk_image(self, to_save=False):
         """Return a simpleITK image object"""
         print("----> Starting CT conversion ...")
@@ -106,65 +138,28 @@ class Ct_image(Patient):
         print(itk_image.GetDirection())
         return itk_image
 
+    def get_mask_from_roi(self):
+        # This method needs a roi_name
+        if self.roi_name is None:
+            raise Exception("Please, give a roi name to the Image Object if you want to use this method")
 
-class ROI(Ct_image):
-    def __init__(self, exam_name, roi_name):
-        super().__init__(exam_name)
-        self.roi_list = self.get_roi_list()
-        self.exam_name = exam_name
-        self.roi_name = roi_name
-        self.roi_mask_npy = None
-
-    def get_roi_list(self):
-        rois = self.case.PatientModel.RegionsOfInterest
-        return [roi.Name for roi in rois]
-
-    def check_roi(self, roi_name_to_test=None):
-        # this method checks if a toi exists
-        if roi_name_to_test is None:
-            roi_name_to_test = self.roi_name
-        roi_check = False
-        rois = self.case.PatientModel.RegionsOfInterest
-        for roi in rois:
-            if roi.Name == roi_name_to_test:
-                roi_check = True
-        return roi_check
-
-    def has_contour(self, roi_name_to_test=None):
-        """ Check if a structure is empty or not"""
-        if roi_name_to_test is None:
-            roi_name_to_test = self.roi_name
-        return self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[roi_name_to_test].HasContours()
-
-    def get_bounding_box(self, roi_name=None):
-        # get coordinates of two point that create a box around the roi_name
-        if roi_name is None:
-            roi_name = self.roi_name
-        bound = self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[roi_name].GetBoundingBox()
-        bounds = [[bound[0]['x'], bound[0]['y'], bound[0]['z']], [bound[1]['x'], bound[1]['y'], bound[1]['z']]]
-        return bounds
-
-    def get_mask_from_roi(self, roi_name=None):
-
-        if roi_name is None:
-            roi_name = self.roi_name
-        # This method need the creation of the itk image if not already done
+        # This method needs the creation of the itk image if not already done
         if self.image_itk is None:
             self.image_itk = self.get_itk_image(to_save=False)
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
-
         try:
-            self.check_roi(roi_name)
-            self.has_contour(roi_name)
+            check_roi(self.case, self.roi_name)
+            has_contour(self.case, self.exam_name, self.roi_name)
         except:
-            raise Exception("This ROI does not exist")
+            raise Exception("This roi does not exist")
 
-        print(f"----> Starting mask creation for {roi_name} on {self.exam_name} ...")
+        print(f"----> Starting mask creation for {self.roi_name} on {self.exam_name} ...")
         # Creation of an empty array that has the same size as the original image
         mask = np.zeros_like(self.image_npy)
 
         # sl is a list of all the dots for one single slice
-        for sl in self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[roi_name].PrimaryShape.Contours:
+        for sl in self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[
+            self.roi_name].PrimaryShape.Contours:
             # for each slice, one creates an array that will contain all the dots coordinates.
             # This array is initialized by using np.ones like this -> coordinates = [[1,1,1] , [1,1,1] ,...]
             # it will be filled with coordinates like this -> [[x1,y1,z1],[x2,y2,z2], ....]
@@ -191,64 +186,20 @@ class ROI(Ct_image):
         self.roi_mask_npy = mask
         return mask
 
-    def look_for_fidu(self, roi_name=None):
-        if roi_name is None:
-            roi_name = self.roi_name
 
-        if self.check_roi(roi_name) and self.has_contour(roi_name):
-            # Image Creation
-            # BE CAREFUL : the first axis is inf/sup in numpy format
-            self.image_itk = self.get_itk_image(to_save=False)
-            self.image_npy = sitk.GetArrayFromImage(self.image_itk)
+class Fidu(Image):
+    def __init__(self, exam_name, roi_name=None):
+        super().__init__(exam_name, roi_name)
 
-            # creating a copy of the numpy array containing the image
-            image_to_process = np.copy(self.image_npy)
+        # Fidu parameter: distance in voxel between two spots
+        self.fidu_size = 10
 
-            # thresholding
-            maximum = np.amax(self.image_npy)
-            print(f'max = {maximum}')
-            image_to_process[self.image_npy < 0.7 * maximum] = 0
-
-            # Applying mask using bounding box
-            if False:
-                # looking for limits of the roi in which the fiducials are
-                bounds = self.get_bounding_box(roi_name)
-                limits = [self.image_itk.TransformPhysicalPointToIndex([i[0], i[1], i[2]]) for i in bounds]
-                print(f"limits : {limits}")
-
-                # removing values outside the roi bounds
-                # z direction
-                image_to_process[0:limits[0][2], :, :] = 0
-                image_to_process[limits[1][2]:, :, :] = 0
-                # x direction
-                image_to_process[:, 0:limits[0][0], :] = 0
-                image_to_process[:, limits[1][0]:, :] = 0
-                # y direction
-                image_to_process[:, :, 0:limits[0][1]] = 0
-                image_to_process[:, :, limits[1][1]:] = 0
-
-            # Applying mask using structure:
-            self.get_mask_from_roi()
-            image_to_process = image_to_process * self.roi_mask_npy
-
-            # Seeking the fiducials
-            position = self.find_local_max(image_to_process)
-
-            # creation of POIs in RS
-            self.poi_creation(position)
-        else:
-            print(f"Please, make a contour for the roi {roi_name}")
+        # Automatic Fidu seeking
+        self.look_for_fidu()
 
     def find_local_max(self, image_to_process):
-        # todo: mettre s dans le init
+        s = self.fidu_size
 
-        # size parameter
-        s = 10
-        # image_max is the dilation of im with a 10x10 structuring element
-        # It is used within peak_local_max function
-        image_max = ndi.maximum_filter(image_to_process, size=s, mode='constant')
-
-        # Comparison between image_max and im to find the coordinates of local maxima
         footprint = np.ones([s, s, s])
         coordinates = peak_local_max(image_to_process, min_distance=s, footprint=footprint)
 
@@ -284,25 +235,42 @@ class ROI(Ct_image):
             self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
                 'x': x, 'y': z, 'z': y}
 
+    def look_for_fidu(self):
+        if check_roi(self.case, self.roi_name) and has_contour(self.case, self.exam_name, self.roi_name):
+            # Image Creation
+            # BE CAREFUL : the first axis is inf/sup in numpy format
+            self.image_itk = self.get_itk_image(to_save=False)
+            self.image_npy = sitk.GetArrayFromImage(self.image_itk)
+
+            # creating a copy of the numpy array containing the image
+            image_to_process = np.copy(self.image_npy)
+
+            # thresholding
+            maximum = np.amax(self.image_npy)
+            print(f'max = {maximum}')
+            image_to_process[self.image_npy < 0.7 * maximum] = 0
+
+            # Applying mask using structure:
+            self.get_mask_from_roi()
+            image_to_process = image_to_process * self.roi_mask_npy
+
+            # Seeking the fiducials
+            position = self.find_local_max(image_to_process)
+
+            # creation of POIs in RS
+            self.poi_creation(position)
+        else:
+            print(f"Please, make a contour for the roi {self.roi_name}")
+
 
 if __name__ == '__main__':
     # ----- Patient -----
     # Creating patient object
     patient = Patient()
+
     # Creating a list containing all the examination names
     examinations = patient.get_examination_list()
+    roi = patient.get_roi_list()
 
-    # exam is one element from the list above
-
-    loop = False
-
-    if loop:
-        for exam in examinations:
-            # ----- Roi -----
-            roi = ROI(exam, 'Foie')
-            roi.look_for_fidu()
-    else:
-        exam = '4D  60%'
-        # ----- Roi -----
-        roi = ROI(exam, 'gtv')
-        roi.look_for_fidu()
+    # Creating Fidu object
+    fidu = Fidu('4D  60%', 'Foie')
