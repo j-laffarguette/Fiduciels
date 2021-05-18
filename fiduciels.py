@@ -6,7 +6,13 @@ from scipy.ndimage import label, generate_binary_structure
 from skimage.draw import polygon2mask
 import SimpleITK as sitk
 import os
+from tkinter import *
+import tkinter
 
+
+# ----------------------------------------------------
+# Functions
+# ----------------------------------------------------
 
 def check_roi(case, roi_to_check):
     # this method checks if a toi exists
@@ -29,6 +35,10 @@ def get_bounding_box(case, examination, roi):
     bounds = [[bound[0]['x'], bound[0]['y'], bound[0]['z']], [bound[1]['x'], bound[1]['y'], bound[1]['z']]]
     return bounds
 
+
+# ----------------------------------------------------
+# Classes
+# ----------------------------------------------------
 
 class Patient:
     def __init__(self):
@@ -179,9 +189,9 @@ class Image(Patient):
             image_shape = [self.columns, self.rows]
             coordinates_xy = [c[0:2] for c in coordinates]
             temp_mask = polygon2mask(image_shape, coordinates_xy)
-            print('mask creation ok!')
 
             mask[int(slice_number), :, :] = temp_mask
+        print('mask creation ok!')
         mask.astype(int)
         self.roi_mask_npy = mask
         return mask
@@ -192,7 +202,7 @@ class Fidu(Image):
         super().__init__(exam_name, roi_name)
 
         # Fidu parameter: distance in voxel between two spots
-        self.fidu_size = 10
+        self.fidu_size = 5
 
         # Automatic Fidu seeking
         self.look_for_fidu()
@@ -263,6 +273,67 @@ class Fidu(Image):
             print(f"Please, make a contour for the roi {self.roi_name}")
 
 
+class TkFOR(tkinter.Tk):
+    def __init__(self, list, roi):
+
+        tkinter.Tk.__init__(self)
+        self.list = list
+        self.roi = roi
+        self.examDict = {}
+        self.__createDict()
+        self.__createWidgets()
+
+    def __createDict(self):
+        for exam in self.list:
+            self.examDict[exam] = IntVar()
+
+    def __execute(self):
+        for image in self.examDict:
+            if self.examDict[image].get() == 1:
+                Fidu(str(image), self.roi)
+
+        self.quit()
+
+    def __end(self):
+        self.quit()
+
+    def __createWidgets(self):
+        # width = 200
+        rowNumber = 0
+        columnNumber = 0
+        rowNumberMax = 15
+
+        # Objects creation
+        self.title("Recherche de fiduciels")
+
+        self.label = Label(self, text="Choisir le/les CTS à analyser (NB: le Foie doit être contouré)",
+                           font=('Arial', '16'))
+        self.label.grid(row=0, column=0, columnspan=(len(self.list) // rowNumberMax + 1))
+
+        for images in self.examDict:
+            rowNumber += 1
+            columnNumber = columnNumber + rowNumber // rowNumberMax
+
+            if has_contour(patient.case, images, self.roi):
+                color = 'green'
+
+            else:
+                color = 'black'
+
+            if (rowNumber // rowNumberMax) != 0:
+                rowNumber = 1
+
+            self.checkbutton = Checkbutton(self, text=images, variable=self.examDict[images], onvalue=1, offvalue=0,
+                                           justify="center", font=('Arial', '9'), fg=color)
+            self.checkbutton.grid(column=columnNumber, row=rowNumber, sticky=W, padx=20)
+
+        self.runButton = Button(self, text='Recherche des fiduciels', command=self.__execute)
+        self.runButton.grid(column=columnNumber, row=rowNumberMax, sticky=E, padx=80, pady=4)
+
+        self.cancelButton = Button(self, text='Annuler', command=self.__end)
+        self.cancelButton.grid(column=columnNumber, row=rowNumberMax, sticky=E, padx=10, pady=4)
+
+
 if __name__ == '__main__':
     # ----- Patient -----
     # Creating patient object
@@ -272,5 +343,9 @@ if __name__ == '__main__':
     examinations = patient.get_examination_list()
     roi = patient.get_roi_list()
 
+    # tkinter
+    app = TkFOR(examinations, 'gtv')
+    app.mainloop()
+
     # Creating Fidu object
-    fidu = Fidu('4D  60%', 'Foie')
+    # fidu = Fidu('4D  60%', 'Foie')
