@@ -1,15 +1,15 @@
+import os
+import tkinter
+from tkinter import *
+
+import SimpleITK as sitk
 import numpy as np
 from connect import *
-from scipy import ndimage as ndi
-from skimage.feature import peak_local_max
-from scipy.ndimage import label, generate_binary_structure
 from skimage.draw import polygon2mask
-import SimpleITK as sitk
-import os
-from tkinter import *
-import tkinter
+from skimage.feature import peak_local_max
 
 
+# todo : ne pas sélectionner les irm et les scanners millimétriques
 # ----------------------------------------------------
 # Functions
 # ----------------------------------------------------
@@ -113,6 +113,7 @@ class Image(Patient):
         # BE CAREFUL : the first axis is inf/sup in numpy format
         self.image_itk = None
         self.image_npy = None
+        self.image_to_process = None
 
         # Roi
         self.roi_name = roi_name
@@ -163,6 +164,11 @@ class Image(Patient):
         except:
             raise Exception("This roi does not exist")
 
+        # Converting the Roi from voxel type to contours type
+        self.case.PatientModel.StructureSets[self.exam_name].RoiGeometries[self.roi_name].SetRepresentation(
+            Representation='Contours')
+
+        # Starting creation
         print(f"----> Starting mask creation for {self.roi_name} on {self.exam_name} ...")
         # Creation of an empty array that has the same size as the original image
         mask = np.zeros_like(self.image_npy)
@@ -191,59 +197,37 @@ class Image(Patient):
             temp_mask = polygon2mask(image_shape, coordinates_xy)
 
             mask[int(slice_number), :, :] = temp_mask
+
         print('mask creation ok!')
         mask.astype(int)
+
         self.roi_mask_npy = mask
         return mask
 
 
 class Fidu(Image):
-    def __init__(self, exam_name, roi_name=None):
+    def __init__(self, exam_name, roi_name=None, maximum=None, threshold_abs=1600, threshold_relative=0.7,
+                 threshold_type='absolute'):
         super().__init__(exam_name, roi_name)
 
         # Fidu parameter: distance in voxel between two spots
-        self.fidu_size = 5
+        self.fidu_size = 10
+
+        # threshold
+        self.threshold_type = threshold_type
+        self.threshold_abs = threshold_abs
+        self.threshold_relative = threshold_relative
+        self.threshold_value = None
+        self.maximum = maximum
 
         # Automatic Fidu seeking
         self.look_for_fidu()
 
     def find_local_max(self, image_to_process):
         s = self.fidu_size
-
         footprint = np.ones([s, s, s])
         coordinates = peak_local_max(image_to_process, min_distance=s, footprint=footprint)
-
-        positions = []
-        for coord in coordinates:
-            # conversion of coordinates into int values
-            coord = tuple(map(float, coord))
-            # replacing z by x
-            # todo: commentaire
-            coord = [coord[1], coord[2], coord[0]]
-            print(coord)
-            position = self.image_itk.TransformContinuousIndexToPhysicalPoint(coord)
-            print(position)
-            positions.append(position)
-
-        # sorting coordinates by z
-        positions = sorted(positions, key=lambda x: x[2])
-
-        return positions
-
-    def poi_creation(self, coordinates):
-        for i, coords in enumerate(coordinates):
-            name = "Fidu " + str(i + 1)
-            try:
-                # POI list creation in RS
-                self.case.PatientModel.CreatePoi(Name=name, Color="Yellow", VisualizationDiameter=1,
-                                                 Type="Undefined")
-            except:
-                # todo : what if the points are already there?
-                print('error')
-            # POI assignation
-            x, z, y = coords
-            self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
-                'x': x, 'y': z, 'z': y}
+        return coordinates
 
     def look_for_fidu(self):
         if check_roi(self.case, self.roi_name) and has_contour(self.case, self.exam_name, self.roi_name):
@@ -255,30 +239,99 @@ class Fidu(Image):
             # creating a copy of the numpy array containing the image
             image_to_process = np.copy(self.image_npy)
 
-            # thresholding
-            maximum = np.amax(self.image_npy)
-            print(f'max = {maximum}')
-            image_to_process[self.image_npy < 0.7 * maximum] = 0
-
             # Applying mask using structure:
             self.get_mask_from_roi()
             image_to_process = image_to_process * self.roi_mask_npy
+            # this attribute is used by post processing
+            self.image_to_process = np.copy(image_to_process)
+
+            # thresholding
+            self.maximum = np.amax(self.image_npy)
+
+            if self.threshold_type == 'absolute':
+                self.threshold_value = self.threshold_abs
+
+            elif self.threshold_type == 'relative':
+                self.threshold_value = self.threshold_relative * self.maximum
+
+            print(f'max = {self.maximum}')
+            print(f'threshold = {self.threshold_abs}')
+            image_to_process[self.image_npy < self.threshold_value] = 0
 
             # Seeking the fiducials
-            position = self.find_local_max(image_to_process)
+            coordinates = self.find_local_max(image_to_process)
+
+            # post processing
+            coordinates = self.post_processing(coordinates)
+
+            # Converting coordinates to positions
+            positions = self.get_position_from_coordinates(coordinates)
+
+            # sorting coordinates by z then by x
+            positions = sorted(positions, key=lambda x: (x[2], x[0]))
 
             # creation of POIs in RS
-            self.poi_creation(position)
+            self.poi_creation(positions)
         else:
             print(f"Please, make a contour for the roi {self.roi_name}")
 
+    def post_processing(self, coordinates):
+        print("\nPost Processing...")
+        s = self.fidu_size
+
+        coord_new = []
+        for index, coord in enumerate(coordinates):
+            i = coord[0]
+            j = coord[1]
+            k = coord[2]
+            matrix = self.image_to_process[i - s:i + s,
+                     j - s:j + s,
+                     k - s:k + s]
+            hist, bin_edges = np.histogram(matrix, bins=[-1500, -200, self.threshold_value, self.maximum])
+            print(hist)
+            if (hist[0] > 0) and (hist[2] < 100):
+                print("-> La tache numéro : " + str(index + 1) + " contient des artefacts!\n")
+                coord_new.append(coord)
+        return coord_new
+
+    def get_position_from_coordinates(self, coordinates):
+
+        # position will contain coordinates of all the fidus (in mm)
+        positions = []
+
+        for coord in coordinates:
+            # conversion of coordinates (x,y,z) into float values
+            coord = tuple(map(float, coord))
+            # replacing z by x
+            coord = [coord[1], coord[2], coord[0]]
+            # transforming coord in position
+            position = self.image_itk.TransformContinuousIndexToPhysicalPoint(coord)
+            positions.append(position)
+
+        return positions
+
+    def poi_creation(self, coordinates):
+        for i, coords in enumerate(coordinates):
+            name = "Fidu " + str(i + 1)
+            try:
+                # POI list creation in RS
+                self.case.PatientModel.CreatePoi(Name=name, Color="Yellow", VisualizationDiameter=1,
+                                                 Type="Undefined")
+            except:
+                print('The POI already exists.')
+            # POI assignation
+            x, z, y = coords
+            self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
+                'x': x, 'y': z, 'z': y}
+
 
 class TkFOR(tkinter.Tk):
-    def __init__(self, list, roi):
+    def __init__(self, patient, roi):
 
         tkinter.Tk.__init__(self)
-        self.list = list
         self.roi = roi
+        self.patient = patient
+        self.list = self.patient.get_examination_list()
         self.examDict = {}
         self.__createDict()
         self.__createWidgets()
@@ -314,17 +367,19 @@ class TkFOR(tkinter.Tk):
             rowNumber += 1
             columnNumber = columnNumber + rowNumber // rowNumberMax
 
-            if has_contour(patient.case, images, self.roi):
-                color = 'green'
+            if has_contour(self.patient.case, images, self.roi):
+                color = 'red'
+                size = "12"
 
             else:
                 color = 'black'
+                size = "9"
 
             if (rowNumber // rowNumberMax) != 0:
                 rowNumber = 1
 
             self.checkbutton = Checkbutton(self, text=images, variable=self.examDict[images], onvalue=1, offvalue=0,
-                                           justify="center", font=('Arial', '9'), fg=color)
+                                           justify="center", font=('Arial', size), fg=color)
             self.checkbutton.grid(column=columnNumber, row=rowNumber, sticky=W, padx=20)
 
         self.runButton = Button(self, text='Recherche des fiduciels', command=self.__execute)
@@ -344,7 +399,7 @@ if __name__ == '__main__':
     roi = patient.get_roi_list()
 
     # tkinter
-    app = TkFOR(examinations, 'gtv')
+    app = TkFOR(patient, 'Foie')
     app.mainloop()
 
     # Creating Fidu object
