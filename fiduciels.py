@@ -1,7 +1,7 @@
 import os
 import tkinter
 from tkinter import *
-
+from math import sqrt
 import SimpleITK as sitk
 import numpy as np
 from connect import *
@@ -9,7 +9,7 @@ from skimage.draw import polygon2mask
 from skimage.feature import peak_local_max
 
 
-# todo : ne pas sélectionner les irm et les scanners millimétriques
+# todo : use the center of mass and not only the maximum
 # ----------------------------------------------------
 # Functions
 # ----------------------------------------------------
@@ -48,9 +48,10 @@ class Patient:
         self.examination_names = []
         self.roi_list = []
 
-    def get_examination_list(self):
-        for i in self.case.Examinations:
-            self.examination_names.append(i.Name)
+    def get_ct_list(self):
+        for exam in self.case.Examinations:
+            if exam.EquipmentInfo.Modality == 'CT':
+                self.examination_names.append(exam.Name)
         return self.examination_names
 
     def get_roi_list(self):
@@ -131,11 +132,11 @@ class Image(Patient):
         result = np.reshape(result, [self.depth, self.columns, self.rows])
 
         # numpy file saving
-        if to_save:
-            # If needed, this saves the numpy array to file for external use
-            path = os.getcwd()
-            with open(os.path.join(path, "results.npy"), 'wb') as f:
-                np.save(f, result)
+        # if to_save:
+        #     # If needed, this saves the numpy array to file for external use
+        #     path = os.getcwd()
+        #     with open(os.path.join(path, "results.npy"), 'wb') as f:
+        #         np.save(f, result)
 
         # Simple ITK conversion
         itk_image = sitk.GetImageFromArray(result)
@@ -206,19 +207,31 @@ class Image(Patient):
 
 
 class Fidu(Image):
-    def __init__(self, exam_name, roi_name=None, maximum=None, threshold_abs=1600, threshold_relative=0.7,
+    def __init__(self, exam_name, roi_name=None, threshold_abs=None, threshold_relative=None,
                  threshold_type='absolute'):
         super().__init__(exam_name, roi_name)
 
         # Fidu parameter: distance in voxel between two spots
         self.fidu_size = 10
 
-        # threshold
-        self.threshold_type = threshold_type
-        self.threshold_abs = threshold_abs
-        self.threshold_relative = threshold_relative
+        # thresholds
+        # if nothing is inserted :  threshold abs with value 1600
+        # if threshold type == relative : threshold value = threshold_relative * max
         self.threshold_value = None
-        self.maximum = maximum
+        self.maximum = None
+        self.threshold_type = threshold_type
+
+        if threshold_abs:
+            self.threshold_value = threshold_abs
+            self.threshold_type = 'absolute'
+
+        if threshold_relative:
+            self.threshold_relative = threshold_relative
+            self.threshold_type = 'relative'
+
+        else:
+            self.threshold_type = 'absolute'
+            self.threshold_value = 1600
 
         # Automatic Fidu seeking
         self.look_for_fidu()
@@ -248,14 +261,11 @@ class Fidu(Image):
             # thresholding
             self.maximum = np.amax(self.image_npy)
 
-            if self.threshold_type == 'absolute':
-                self.threshold_value = self.threshold_abs
-
-            elif self.threshold_type == 'relative':
+            if self.threshold_type == 'relative':
                 self.threshold_value = self.threshold_relative * self.maximum
 
             print(f'max = {self.maximum}')
-            print(f'threshold = {self.threshold_abs}')
+            print(f'threshold = {self.threshold_value}')
             image_to_process[self.image_npy < self.threshold_value] = 0
 
             # Seeking the fiducials
@@ -264,12 +274,13 @@ class Fidu(Image):
             # post processing
             coordinates = self.post_processing(coordinates)
 
-            # Converting coordinates to positions
+            # Converting coordinates to positions (in mm)
             positions = self.get_position_from_coordinates(coordinates)
 
-            # sorting coordinates by z then by x
-            positions = sorted(positions, key=lambda x: (x[2], x[0]))
-
+            # sorting coordinates compared to the image origin
+            d = [sqrt(p[0] ** 2 + p[1] ** 2 + p[2] ** 2) for p in positions]
+            positions = [x for _, x in sorted(zip(d, positions))]
+            print(positions)
             # creation of POIs in RS
             self.poi_creation(positions)
         else:
@@ -326,12 +337,12 @@ class Fidu(Image):
 
 
 class TkFOR(tkinter.Tk):
-    def __init__(self, patient, roi):
+    def __init__(self, patient_object, roi):
 
         tkinter.Tk.__init__(self)
         self.roi = roi
-        self.patient = patient
-        self.list = self.patient.get_examination_list()
+        self.patient = patient_object
+        self.list = self.patient.get_ct_list()
         self.examDict = {}
         self.__createDict()
         self.__createWidgets()
@@ -359,15 +370,15 @@ class TkFOR(tkinter.Tk):
         # Objects creation
         self.title("Recherche de fiduciels")
 
-        self.label = Label(self, text="Choisir le/les CTS à analyser (NB: le Foie doit être contouré)",
+        self.label = Label(self, text="Choisir le/les CTS à analyser\n (NB: le Foie doit être contouré) \n",
                            font=('Arial', '16'))
         self.label.grid(row=0, column=0, columnspan=(len(self.list) // rowNumberMax + 1))
 
-        for images in self.examDict:
+        for image in self.examDict:
             rowNumber += 1
             columnNumber = columnNumber + rowNumber // rowNumberMax
 
-            if has_contour(self.patient.case, images, self.roi):
+            if has_contour(self.patient.case, image, self.roi) and "Dosi" not in image.capitalize():
                 color = 'red'
                 size = "12"
 
@@ -378,7 +389,7 @@ class TkFOR(tkinter.Tk):
             if (rowNumber // rowNumberMax) != 0:
                 rowNumber = 1
 
-            self.checkbutton = Checkbutton(self, text=images, variable=self.examDict[images], onvalue=1, offvalue=0,
+            self.checkbutton = Checkbutton(self, text=image, variable=self.examDict[image], onvalue=1, offvalue=0,
                                            justify="center", font=('Arial', size), fg=color)
             self.checkbutton.grid(column=columnNumber, row=rowNumber, sticky=W, padx=20)
 
@@ -395,12 +406,9 @@ if __name__ == '__main__':
     patient = Patient()
 
     # Creating a list containing all the examination names
-    examinations = patient.get_examination_list()
-    roi = patient.get_roi_list()
+    # examinations = patient.get_ct_list()
+    # roi = patient.get_roi_list()
 
     # tkinter
     app = TkFOR(patient, 'Foie')
     app.mainloop()
-
-    # Creating Fidu object
-    # fidu = Fidu('4D  60%', 'Foie')
