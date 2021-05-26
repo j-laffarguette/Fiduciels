@@ -372,6 +372,8 @@ class TkFOR(tkinter.Tk):
         
         ## Liste pour stocker les dictionnaires des examens en fonction des Roi
         self.roiExamList = []
+        ## Liste pour stocker les Roi cochées
+        self.activatedRoiList = []
         
         ## Liste pour stocker les dictionnaires des examens en fonction des Roi
         self.checkRegistrationForLiver = IntVar()
@@ -409,6 +411,8 @@ class TkFOR(tkinter.Tk):
         fr2_columnNumber = 0
         fr2_rowNumberMax = 3
         
+        print(str(self.activatedRoiList[roiNumber][1]))
+        
     ## Case à cocher pour la sélection des ROIs        
         for i, (image, image_value) in enumerate(self.roiExamList[roiNumber].items()): 
 
@@ -416,18 +420,20 @@ class TkFOR(tkinter.Tk):
             fr2_columnNumber = (i) // fr2_rowNumberMax
             color = 'black'
             size = "9"
-                       
+            
+            # if str(self.activatedRoiList[roiNumber][1] HAS CONTOUR :             
             self.checkbutton2 = Checkbutton(widget, text=image, variable=self.roiExamList[roiNumber][image], onvalue=1, offvalue=0,
                                        justify="center", font=('Arial', size), fg=color)
             self.checkbutton2.grid(column=fr2_columnNumber, row=fr2_rowNumber, sticky=W, padx=20)
-            
+            # else : 
+                # " Moi je n'afficherai meme pas la série"
             
     def __callBack_roiChecked(self):
     
-        activatedRoiList = self.__returnActivatedRoi()       
+        self.activatedRoiList = self.__returnActivatedRoi()       
         
         ### Detruit tout le frame 2 lorsqu'aucune case n'est coché
-        if len(activatedRoiList) == 0 : 
+        if len(self.activatedRoiList) == 0 : 
             self.__delete_frame(self.Frame2_canvas)
             self.__delete_frame(self.Frame2)
             self.Frame2.grid_forget()
@@ -454,9 +460,9 @@ class TkFOR(tkinter.Tk):
             fr2_columnNumber = 0
             fr2_rowNumberMax = 3
             count = 0
-            for r in range (0,len(activatedRoiList)) : 
+            for r in range (0,len(self.activatedRoiList)) : 
                     
-                label2 = Label(self.Frame2_canvas, text="Sélectionner les images pour la structure "+ str(activatedRoiList[r][1]),
+                label2 = Label(self.Frame2_canvas, text="Sélectionner les images pour la structure "+ str(self.activatedRoiList[r][1]),
                            font=('Arial', '10'))
                 label2.grid(row = count, column=0, sticky='w')
                 
@@ -464,7 +470,7 @@ class TkFOR(tkinter.Tk):
 
                 count += min(len(self.examinationList) , fr2_rowNumberMax ) + 1
                 
-                if (activatedRoiList[r][1] == "Foie") :
+                if (self.activatedRoiList[r][1] == "Foie") :
                     
                     label_Foie = Label(self.Frame2_canvas, text="Réaliser les recalages entre les différentes séries d'images sélectionnées : ",
                                font=('Arial', '10'),justify="center")
