@@ -207,8 +207,7 @@ class Image(Patient):
 
 
 class Fidu(Image):
-    def __init__(self, exam_name, roi_name=None, threshold_abs=None, threshold_relative=None,
-                 threshold_type='absolute'):
+    def __init__(self, exam_name, roi_name=None, threshold_abs=None, threshold_relative=None):
         super().__init__(exam_name, roi_name)
 
         # Fidu parameter: distance in voxel between two spots
@@ -219,7 +218,6 @@ class Fidu(Image):
         # if threshold type == relative : threshold value = threshold_relative * max
         self.threshold_value = None
         self.maximum = None
-        self.threshold_type = threshold_type
 
         if threshold_abs:
             self.threshold_value = threshold_abs
