@@ -7,6 +7,7 @@ import numpy as np
 from connect import *
 from skimage.draw import polygon2mask
 from skimage.feature import peak_local_max
+from skimage.filters import gaussian
 
 
 # todo : use the center of mass and not only the maximum
@@ -131,13 +132,6 @@ class Image(Patient):
         result = self.slope * result + self.intercept
         result = np.reshape(result, [self.depth, self.columns, self.rows])
 
-        # numpy file saving
-        # if to_save:
-        #     # If needed, this saves the numpy array to file for external use
-        #     path = os.getcwd()
-        #     with open(os.path.join(path, "results.npy"), 'wb') as f:
-        #         np.save(f, result)
-
         # Simple ITK conversion
         itk_image = sitk.GetImageFromArray(result)
         itk_image.SetDirection(self.direction)
@@ -212,6 +206,7 @@ class Fidu(Image):
 
         # Fidu parameter: distance in voxel between two spots
         self.fidu_size = 10
+        self.diameter = 5  # in mm
 
         # thresholds
         # if nothing is inserted :  threshold abs with value 1600
@@ -228,8 +223,9 @@ class Fidu(Image):
             self.threshold_type = 'relative'
 
         else:
-            self.threshold_type = 'absolute'
-            self.threshold_value = 1600
+            self.threshold_type = 'relative'
+            self.threshold_relative = 0.6
+            # self.threshold_value = 1600
 
         # Automatic Fidu seeking
         self.look_for_fidu()
@@ -240,12 +236,23 @@ class Fidu(Image):
         coordinates = peak_local_max(image_to_process, min_distance=s, footprint=footprint)
         return coordinates
 
-    def look_for_fidu(self):
+    def look_for_fidu(self, filtering=True):
         if check_roi(self.case, self.roi_name) and has_contour(self.case, self.exam_name, self.roi_name):
+            print('---------------------------------------')
+            print(f'\nRECHERCHE DE FIDU POUR --> {self.exam_name}\n')
+            print('---------------------------------------')
             # Image Creation
             # BE CAREFUL : the first axis is inf/sup in numpy format
             self.image_itk = self.get_itk_image(to_save=False)
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
+
+            if filtering:
+                if self.slice_thickness < 0.3:
+                    print(f'filtering with a high sigma value')
+                    self.image_npy = gaussian(self.image_npy, sigma=0.5)
+                elif self.slice_thickness == 0.3:
+                    print(f'filtering with a low sigma value')
+                    self.image_npy = gaussian(self.image_npy, sigma=0.1)
 
             # creating a copy of the numpy array containing the image
             image_to_process = np.copy(self.image_npy)
@@ -285,7 +292,7 @@ class Fidu(Image):
             print(f"Please, make a contour for the roi {self.roi_name}")
 
     def post_processing(self, coordinates):
-        print("\nPost Processing...")
+        print("\nPost Processing (looking for artefacts)...")
         s = self.fidu_size
 
         coord_new = []
@@ -302,6 +309,9 @@ class Fidu(Image):
                 print("-> La tache numéro : " + str(index + 1) + " contient des artefacts!\n")
                 coord_new.append(coord)
         return coord_new
+
+    def post_process_distance(self, coordinates):
+        print("\nPost Processing (distance verification)...")
 
     def get_position_from_coordinates(self, coordinates):
 
