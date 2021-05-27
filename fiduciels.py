@@ -43,10 +43,12 @@ def get_bounding_box(case, examination, roi):
 
 class Patient:
     def __init__(self):
+
         self.case = get_current("Case")
         self.examination = get_current("Examination")
         self.patient = get_current("Patient")
         self.examination_names = []
+        self.irm_names = []
         self.roi_list = []
 
     def get_ct_list(self):
@@ -54,6 +56,15 @@ class Patient:
             if exam.EquipmentInfo.Modality == 'CT':
                 self.examination_names.append(exam.Name)
         return self.examination_names
+
+    def get_irm_list(self):
+        name, modality = [], []
+        for exam in self.case.Examinations:
+            if exam.EquipmentInfo.Modality == 'MR':
+                name.append(exam.Name)
+                modality.append(exam.GetProtocolName())
+        self.irm_names = list(zip(name, modality))
+        return self.irm_names
 
     def get_roi_list(self):
         rois = self.case.PatientModel.RegionsOfInterest
@@ -121,7 +132,12 @@ class Image(Patient):
         self.roi_name = roi_name
         self.roi_mask_npy = None
 
-    def get_itk_image(self, to_save=False):
+        # IRM
+        # name of the dixon IRM
+        self.dixon_name = None
+        # self.get_dixon_name()
+
+    def get_itk_image(self):
         """Return a simpleITK image object"""
         print("----> Starting CT conversion ...")
         result = np.zeros(self.n_voxels)
@@ -144,14 +160,18 @@ class Image(Patient):
         print(itk_image.GetDirection())
         return itk_image
 
-    def get_mask_from_roi(self):
+    def get_mask_from_roi(self, roi_name=None):
+
         # This method needs a roi_name
-        if self.roi_name is None:
-            raise Exception("Please, give a roi name to the Image Object if you want to use this method")
+        if roi_name is None:
+            if self.roi_name is None:
+                raise Exception("Please, give a roi name to the Image Object if you want to use this method")
+        else:
+            self.roi_name = roi_name
 
         # This method needs the creation of the itk image if not already done
         if self.image_itk is None:
-            self.image_itk = self.get_itk_image(to_save=False)
+            self.image_itk = self.get_itk_image()
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
         try:
             check_roi(self.case, self.roi_name)
@@ -199,6 +219,18 @@ class Image(Patient):
         self.roi_mask_npy = mask
         return mask
 
+    def get_dixon_name(self):
+        # todo : check if there might be more than one dixon
+        irm_list = self.get_irm_list()
+        for irm_modality in irm_list:
+            if "DIXON" in irm_modality[1]:
+                self.dixon_name = irm_modality[0]
+
+    def create_IRM_external(self):
+        self.case.PatientModel.RegionsOfInterest['External'].CreateExternalGeometry(
+            Examination=self.case.Examinations[self.dixon_name],
+            ThresholdLevel=32)
+
 
 class Fidu(Image):
     def __init__(self, exam_name, roi_name=None, threshold_abs=None, threshold_relative=None):
@@ -227,8 +259,14 @@ class Fidu(Image):
             self.threshold_relative = 0.6
             # self.threshold_value = 1600
 
+        # Fidu names in RS
+        self.fidu_prefix_names = "Fidu "
+
         # Automatic Fidu seeking
-        self.look_for_fidu()
+        # self.look_for_fidu()
+
+        # Box size (cm)
+        self.box_size = 1.5
 
     def find_local_max(self, image_to_process):
         s = self.fidu_size
@@ -243,7 +281,7 @@ class Fidu(Image):
             print('---------------------------------------')
             # Image Creation
             # BE CAREFUL : the first axis is inf/sup in numpy format
-            self.image_itk = self.get_itk_image(to_save=False)
+            self.image_itk = self.get_itk_image()
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
 
             if filtering:
@@ -310,8 +348,8 @@ class Fidu(Image):
                 coord_new.append(coord)
         return coord_new
 
-    def post_process_distance(self, coordinates):
-        print("\nPost Processing (distance verification)...")
+    # def post_process_distance(self, coordinates):
+    #     print("\nPost Processing (distance verification)...")
 
     def get_position_from_coordinates(self, coordinates):
 
@@ -331,7 +369,7 @@ class Fidu(Image):
 
     def poi_creation(self, coordinates):
         for i, coords in enumerate(coordinates):
-            name = "Fidu " + str(i + 1)
+            name = self.fidu_prefix_names + str(i + 1)
             try:
                 # POI list creation in RS
                 self.case.PatientModel.CreatePoi(Name=name, Color="Yellow", VisualizationDiameter=1,
@@ -342,6 +380,92 @@ class Fidu(Image):
             x, z, y = coords
             self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
                 'x': x, 'y': z, 'z': y}
+
+    def look_in_irm(self):
+        # The Name of DIXON IRM is self.dixon_name
+        # 1- ones needs to register IRM and CT and to copy little boxes centered to the fidu and copy them to the IRM
+
+        self.get_dixon_name()
+
+        # External Creation on dixon acquisition
+        self.create_IRM_external()
+
+        # Setting CT as primary
+        self.case.Examinations[self.exam_name].SetPrimary()
+        self.case.Examinations[self.dixon_name].SetSecondary()
+
+        # Rigid registration between IRM and CT
+        self.case.ComputeRigidImageRegistration(FloatingExaminationName=self.dixon_name,
+                                                ReferenceExaminationName=self.exam_name,
+                                                UseOnlyTranslations=False, HighWeightOnBones=False,
+                                                InitializeImages=True,
+                                                FocusRoisNames=[self.roi_name], RegistrationName=None)
+
+        # Copying ROI from CT to IRM
+        roi_list = []
+        coordinates = []
+        for poi in self.case.PatientModel.PointsOfInterest:
+
+            # Work only with the fidus named 'Fidu 1" etc.
+            if self.fidu_prefix_names in poi.Name:
+                x = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.x
+                y = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.y
+                z = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.z
+                coordinates.append([x, y, z])
+
+                roi_name = poi.Name + '_roi'
+                roi_list.append(roi_name)
+
+                try:
+                    self.case.PatientModel.CreateRoi(Name=roi_name, Color="Yellow", Type="Marker", TissueName=None,
+                                                     RbeCellTypeName=None, RoiMaterial=None)
+                except:
+                    print(f'{roi_name} already exists!')
+
+                self.case.PatientModel.RegionsOfInterest[roi_name].CreateBoxGeometry(
+                    Size={'x': self.box_size, 'y': self.box_size, 'z': self.box_size}, Examination=self.examination,
+                    Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
+
+                self.case.PatientModel.CopyRoiGeometries(SourceExamination=self.examination,
+                                                         TargetExaminationNames=[self.dixon_name],
+                                                         RoiNames=[roi_name])
+
+        # Then, one needs to create an itk image with dixon
+
+        obj_irm = Fidu(self.dixon_name)
+        # Creating an ITK image and then an associated numpy array
+        image_irm = obj_irm.get_itk_image()
+        img_npy = sitk.GetArrayFromImage(image_irm)
+
+        positions = []
+        for roi in roi_list:
+            image_to_process = np.copy(img_npy)
+
+            # mask creating for each roi and multiplying the image by the mask
+            mask = obj_irm.get_mask_from_roi(roi)
+            image_to_process = image_to_process * mask
+
+            # every voxel that have zero value get max value, then invert all the value and get them positive
+            maximum = np.amax(image_to_process)
+            image_to_process[image_to_process == 0] = maximum
+            image_to_process = image_to_process * (-1) + maximum
+
+            # Applying gaussian filter
+            image_to_process = gaussian(image_to_process, sigma=0.5)
+
+            # Deleting all low values
+            maximum = np.amax(image_to_process)
+            image_to_process[image_to_process < 0.6 * maximum] = 0
+
+            # finding local max
+            coord = obj_irm.find_local_max(image_to_process)
+            position = obj_irm.get_position_from_coordinates(coord)
+            positions.append(position[0])
+
+            obj_irm.case.PatientModel.RegionsOfInterest[roi].DeleteRoi()
+
+        print(positions)
+        obj_irm.poi_creation(positions)
 
 
 class TkFOR(tkinter.Tk):
@@ -362,8 +486,18 @@ class TkFOR(tkinter.Tk):
     def __execute(self):
         for image in self.examDict:
             if self.examDict[image].get() == 1:
-                Fidu(str(image), self.roi)
+                fid = Fidu(str(image), self.roi)
 
+                # Recherche des fiduciels dans les CT
+                fid.look_for_fidu()
+
+                # Recherche des fiduciels dans l'IRM à partir du CT 4D
+                if '%' in image:
+                    try:
+                        fid_irm = Fidu(image, self.roi)
+                        fid_irm.look_in_irm()
+                    except:
+                        print("Impossible de rechercher les fidus sur l'irm. Voir logs")
         self.quit()
 
     def __end(self):
@@ -389,6 +523,14 @@ class TkFOR(tkinter.Tk):
             if has_contour(self.patient.case, image, self.roi) and "Dosi" not in image.capitalize():
                 color = 'red'
                 size = "12"
+
+                # primary or secondary setting for registration
+                if "%" in image:
+                    print(f'Setting {image} as primary')
+                    self.patient.case.Examinations[image].SetPrimary()
+                else:
+                    print(f'Setting {image} as secondary')
+                    self.patient.case.Examinations[image].SetSecondary()
 
             else:
                 color = 'black'
@@ -416,6 +558,9 @@ if __name__ == '__main__':
     # Creating a list containing all the examination names
     # examinations = patient.get_ct_list()
     # roi = patient.get_roi_list()
+
+    # img = Fidu('CT 1', 'Foie')
+    # img.look_in_irm()
 
     # tkinter
     app = TkFOR(patient, 'Foie')
