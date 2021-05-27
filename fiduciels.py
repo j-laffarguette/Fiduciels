@@ -256,7 +256,7 @@ class Fidu(Image):
 
         else:
             self.threshold_type = 'relative'
-            self.threshold_relative = 0.6
+            self.threshold_relative = 0.55
             # self.threshold_value = 1600
 
         # Fidu names in RS
@@ -266,7 +266,8 @@ class Fidu(Image):
         # self.look_for_fidu()
 
         # Box size (cm)
-        self.box_size = 1.5
+        self.box_size = 1
+        self.radius = 0.55
 
     def find_local_max(self, image_to_process):
         s = self.fidu_size
@@ -422,8 +423,8 @@ class Fidu(Image):
                 except:
                     print(f'{roi_name} already exists!')
 
-                self.case.PatientModel.RegionsOfInterest[roi_name].CreateBoxGeometry(
-                    Size={'x': self.box_size, 'y': self.box_size, 'z': self.box_size}, Examination=self.examination,
+                self.case.PatientModel.RegionsOfInterest[roi_name].CreateSphereGeometry(
+                    Radius=self.radius, Examination=self.examination,
                     Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
 
                 self.case.PatientModel.CopyRoiGeometries(SourceExamination=self.examination,
