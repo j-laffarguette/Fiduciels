@@ -267,7 +267,7 @@ class Fidu(Image):
 
         # Box size (cm)
         self.box_size = 1
-        self.radius = 1
+        self.radius = 1.25
 
     def find_local_max(self, image_to_process):
         s = self.fidu_size
@@ -275,7 +275,7 @@ class Fidu(Image):
         coordinates = peak_local_max(image_to_process, min_distance=s, footprint=footprint)
         return coordinates
 
-    def look_for_fidu(self, filtering=True, semi_auto=False):
+    def look_for_fidu(self, filtering=True):
 
         # If a detection is not possible, one keeps in mind the exam name and retry it at the end
         keep_in_mind = None
@@ -331,12 +331,14 @@ class Fidu(Image):
             print(positions)
             # creation of POIs in RS
             self.poi_creation(positions)
+
+            roi_list = self.create_sphere_roi()
+
         else:
             keep_in_mind = str(self.exam_name)
             print(f"Please, make a contour for the roi {self.roi_name}")
 
-        if keep_in_mind:
-            return keep_in_mind
+        return keep_in_mind, roi_list
 
     def post_processing(self, coordinates):
         print("\nPost Processing (looking for artefacts)...")
@@ -410,33 +412,14 @@ class Fidu(Image):
         # Rigid registration between IRM and CT
         self.rigid_registration(self.dixon_name, self.exam_name, self.roi_name)
 
-        # Copying ROIs from CT to IRM
-        roi_list = []
-        coordinates = []
-        for poi in self.case.PatientModel.PointsOfInterest:
+        # Creating little spheres
+        coord, roi_list = self.create_sphere_roi()
 
-            # Work only with the fidus named 'Fidu 1" etc.
-            if self.fidu_prefix_names in poi.Name:
-                x = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.x
-                y = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.y
-                z = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.z
-                coordinates.append([x, y, z])
-
-                roi_name = poi.Name + '_roi'
-                roi_list.append(roi_name)
-
-                try:
-                    self.case.PatientModel.CreateRoi(Name=roi_name, Color="Yellow", Type="Marker", TissueName=None,
-                                                     RbeCellTypeName=None, RoiMaterial=None)
-                except:
-                    print(f'{roi_name} already exists!')
-
-                self.case.PatientModel.RegionsOfInterest[roi_name].CreateSphereGeometry(
-                    Radius=self.radius, Examination=self.examination,
-                    Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
-
-                # Copying Rois one by one
-                self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi_name)
+        # Copying Rois one by one
+        for roi_name in roi_list:
+            print(roi_name)
+            print(self.exam_name)
+            self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi_name)
 
         # Copy of the liver roi
         self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi)
@@ -480,10 +463,11 @@ class Fidu(Image):
             position = obj_irm.get_position_from_coordinates(coord)
             positions.append(position[0])
 
-            obj_irm.case.PatientModel.RegionsOfInterest[roi].DeleteRoi()
+            # obj_irm.case.PatientModel.RegionsOfInterest[roi].DeleteRoi()
 
         print(positions)
         obj_irm.poi_creation(positions)
+        obj_irm.create_sphere_roi()
 
     def copy_roi(self, source, target, roi):
         try:
@@ -493,13 +477,37 @@ class Fidu(Image):
         except:
             print('Unable to copy the structure')
 
-    def rigid_registration(self, floating_exam, reference_exam, focus_roi):
+    def rigid_registration(self, floating_exam, reference_exam, focus_roi, registration_name=None):
         # Rigid registration between floating and reference with focus_roi
         self.case.ComputeRigidImageRegistration(FloatingExaminationName=floating_exam,
                                                 ReferenceExaminationName=reference_exam,
                                                 UseOnlyTranslations=False, HighWeightOnBones=False,
                                                 InitializeImages=True,
-                                                FocusRoisNames=[focus_roi], RegistrationName=None)
+                                                FocusRoisNames=[focus_roi], RegistrationName=registration_name)
+
+    def create_sphere_roi(self):
+        """ poi is a part of case.PatientModel.PointsOfInterest"""
+        coordinates, roi_list = [], []
+        for poi in self.case.PatientModel.PointsOfInterest:
+            # Work only with the fidus named 'Fidu 1" etc.
+            if self.fidu_prefix_names in poi.Name:
+                x = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.x
+                y = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.y
+                z = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.z
+                coordinates.append([x, y, z])
+                roi_name = poi.Name + '_roi'
+                roi_list.append(roi_name)
+
+                try:
+                    self.case.PatientModel.CreateRoi(Name=roi_name, Color="Yellow", Type="Marker", TissueName=None,
+                                                     RbeCellTypeName=None, RoiMaterial=None)
+                except:
+                    print(f'{roi_name} already exists!')
+
+                self.case.PatientModel.RegionsOfInterest[roi_name].CreateSphereGeometry(
+                    Radius=self.radius, Examination=self.case.Examinations[self.exam_name],
+                    Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
+        return coordinates, roi_list
 
 
 class TkFOR(tkinter.Tk):
@@ -511,6 +519,7 @@ class TkFOR(tkinter.Tk):
         self.list = self.patient.get_ct_list()
         self.main_exam = None
         self.examDict = {}
+        self.roi_list = []
         self.__createDict()
         self.__createWidgets()
 
@@ -519,40 +528,54 @@ class TkFOR(tkinter.Tk):
             self.examDict[exam] = IntVar()
 
     def __execute(self):
+        compteur = 0
         kept_in_mind = []
         for image in self.examDict:
+
             if self.examDict[image].get() == 1:
                 fid = Fidu(str(image), self.roi)
-                # Recherche des fiduciels dans les CT
-                res = fid.look_for_fidu()
 
+                # Recherche des fiduciels dans les CT
+                # If a detection is not possible (no roi contoured), one keeps in mind the exam name -> res
+                res, self.roi_list = fid.look_for_fidu()
+
+                if res:
+                    kept_in_mind.append(res)
+                # -----------------------------------------------------
                 # Recherche des fiduciels dans l'IRM à partir du CT 4D
-                if '%' in image:
+                # -----------------------------------------------------
+                # if the irm was already registered, it's not done an other time
+                if '%' in image and compteur == 0:
+                    compteur += 1
                     self.main_exam = str(image)
                     try:
-
                         fid_irm = Fidu(image, self.roi)
                         fid_irm.look_in_irm(self.roi)
+                        try:
+                            fid_irm.rigid_registration(floating_exam=fid_irm.exam_name, reference_exam=self.main_exam,
+                                                       focus_roi=self.roi_list)
+                        except:
+                            print('not able to register images')
                     except:
                         print("Impossible de trouver les fidus sur l'irm. Voir logs")
 
-                else:
-                    kept_in_mind.append(res)
-
         for image in kept_in_mind:
             try:
-                print(f'main exam {self.main_exam}')
-                print(f'kept in mind {image}')
+                kept_obj = Fidu(str(image), self.roi)
+                kept_obj.rigid_registration(floating_exam=image, reference_exam=self.main_exam, focus_roi=self.roi)
+                kept_obj.copy_roi(source=self.main_exam, target=image, roi=self.roi)
+                kept_obj.look_for_fidu()
+                # fid.create_sphere_roi()
+                try:
 
-                fid = Fidu(str(image), self.roi)
-
-                fid.rigid_registration(floating_exam=image, reference_exam=self.main_exam, focus_roi=self.roi)
-                fid.copy_roi(source=self.main_exam, target=image, roi=self.roi)
-                fid.look_for_fidu()
-
+                    kept_obj.rigid_registration(floating_exam=image, reference_exam=self.main_exam,
+                                                focus_roi=self.roi_list, registration_name='test')
+                except:
+                    print('not able to register images')
             except:
                 print('problem with kept in mind')
-
+        # todo: remettre les delete
+        # todo: trouver un moyen de recaler
         self.quit()
 
     def __end(self):
