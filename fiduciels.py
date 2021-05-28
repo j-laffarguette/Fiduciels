@@ -436,10 +436,10 @@ class Fidu(Image):
                     Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
 
                 # Copying Rois one by one
-                self.copy_roi(source=self.examination, target=self.dixon_name, roi=roi_name)
+                self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi_name)
 
         # Copy of the liver roi
-        self.copy_roi(source=self.examination, target=self.dixon_name, roi=roi)
+        self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi)
 
         # -------------------------------------------------------
         # FIDU CREATION
@@ -486,9 +486,12 @@ class Fidu(Image):
         obj_irm.poi_creation(positions)
 
     def copy_roi(self, source, target, roi):
-        self.case.PatientModel.CopyRoiGeometries(SourceExamination=self.case.Examinations[source],
-                                                 TargetExaminationNames=[target],
-                                                 RoiNames=[roi])
+        try:
+            self.case.PatientModel.CopyRoiGeometries(SourceExamination=self.case.Examinations[source],
+                                                     TargetExaminationNames=[target],
+                                                     RoiNames=[roi])
+        except:
+            print('Unable to copy the structure')
 
     def rigid_registration(self, floating_exam, reference_exam, focus_roi):
         # Rigid registration between floating and reference with focus_roi
@@ -522,19 +525,19 @@ class TkFOR(tkinter.Tk):
                 fid = Fidu(str(image), self.roi)
                 # Recherche des fiduciels dans les CT
                 res = fid.look_for_fidu()
-                if res:
-                    kept_in_mind.append(res)
-                else:
-                    self.main_exam = image
 
                 # Recherche des fiduciels dans l'IRM à partir du CT 4D
                 if '%' in image:
+                    self.main_exam = str(image)
                     try:
 
                         fid_irm = Fidu(image, self.roi)
                         fid_irm.look_in_irm(self.roi)
                     except:
                         print("Impossible de trouver les fidus sur l'irm. Voir logs")
+
+                else:
+                    kept_in_mind.append(res)
 
         for image in kept_in_mind:
             try:
