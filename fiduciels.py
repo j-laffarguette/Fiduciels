@@ -229,7 +229,7 @@ class Image(Patient):
     def create_IRM_external(self):
         self.case.PatientModel.RegionsOfInterest['External'].CreateExternalGeometry(
             Examination=self.case.Examinations[self.dixon_name],
-            ThresholdLevel=32)
+            ThresholdLevel=15)
 
 
 class Fidu(Image):
@@ -267,7 +267,7 @@ class Fidu(Image):
 
         # Box size (cm)
         self.box_size = 1
-        self.radius = 0.55
+        self.radius = 1
 
     def find_local_max(self, image_to_process):
         s = self.fidu_size
@@ -382,7 +382,11 @@ class Fidu(Image):
             self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
                 'x': x, 'y': z, 'z': y}
 
-    def look_in_irm(self):
+    def look_in_irm(self, roi='Foie'):
+
+        # Roi inside which one is looking for the fidus (usually -> 'Foie')
+        input_roi = roi
+
         # The Name of DIXON IRM is self.dixon_name
         # 1- ones needs to register IRM and CT and to copy little boxes centered to the fidu and copy them to the IRM
 
@@ -402,7 +406,7 @@ class Fidu(Image):
                                                 InitializeImages=True,
                                                 FocusRoisNames=[self.roi_name], RegistrationName=None)
 
-        # Copying ROI from CT to IRM
+        # Copying ROIs from CT to IRM
         roi_list = []
         coordinates = []
         for poi in self.case.PatientModel.PointsOfInterest:
@@ -427,24 +431,37 @@ class Fidu(Image):
                     Radius=self.radius, Examination=self.examination,
                     Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
 
+                # Copying Rois one by one
                 self.case.PatientModel.CopyRoiGeometries(SourceExamination=self.examination,
                                                          TargetExaminationNames=[self.dixon_name],
                                                          RoiNames=[roi_name])
 
-        # Then, one needs to create an itk image with dixon
+        # Copy of the liver roi
+        self.case.PatientModel.CopyRoiGeometries(SourceExamination=self.examination,
+                                                 TargetExaminationNames=[self.dixon_name],
+                                                 RoiNames=[roi])
 
+        # -------------------------------------------------------
+        # FIDU CREATION
+        # -------------------------------------------------------
+        # Creating a Fidu object with dixon image as main exam attribute
         obj_irm = Fidu(self.dixon_name)
         # Creating an ITK image and then an associated numpy array
         image_irm = obj_irm.get_itk_image()
         img_npy = sitk.GetArrayFromImage(image_irm)
 
+        # Creating a mask with the input roi (usually -> Foie)
+        roi_mask = obj_irm.get_mask_from_roi(input_roi)
+
+        # Then, fidu creation for all the little rois
         positions = []
         for roi in roi_list:
             image_to_process = np.copy(img_npy)
 
-            # mask creating for each roi and multiplying the image by the mask
+            # creating mask for each roi and multiplying the image by the both masks
             mask = obj_irm.get_mask_from_roi(roi)
-            image_to_process = image_to_process * mask
+
+            image_to_process = image_to_process * mask * roi_mask
 
             # every voxel that have zero value get max value, then invert all the value and get them positive
             maximum = np.amax(image_to_process)
@@ -496,7 +513,7 @@ class TkFOR(tkinter.Tk):
                 if '%' in image:
                     try:
                         fid_irm = Fidu(image, self.roi)
-                        fid_irm.look_in_irm()
+                        fid_irm.look_in_irm(self.roi)
                     except:
                         print("Impossible de rechercher les fidus sur l'irm. Voir logs")
         self.quit()
