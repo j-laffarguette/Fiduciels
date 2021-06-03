@@ -1,2 +1,8 @@
 
 *.dcm
+*.npy
+*.xml
+*.iml
+*.pyc
+*.db
+*.tif
