@@ -1,7 +1,6 @@
 import os
-import tkinter as tk
+import tkinter
 from tkinter import *
-from tkinter import ttk
 from math import sqrt
 import SimpleITK as sitk
 import numpy as np
@@ -44,10 +43,12 @@ def get_bounding_box(case, examination, roi):
 
 class Patient:
     def __init__(self):
+
         self.case = get_current("Case")
         self.examination = get_current("Examination")
         self.patient = get_current("Patient")
         self.examination_names = []
+        self.irm_names = []
         self.roi_list = []
 
     def get_ct_list(self):
@@ -55,6 +56,15 @@ class Patient:
             if exam.EquipmentInfo.Modality == 'CT':
                 self.examination_names.append(exam.Name)
         return self.examination_names
+
+    def get_irm_list(self):
+        name, modality = [], []
+        for exam in self.case.Examinations:
+            if exam.EquipmentInfo.Modality == 'MR':
+                name.append(exam.Name)
+                modality.append(exam.GetProtocolName())
+        self.irm_names = list(zip(name, modality))
+        return self.irm_names
 
     def get_roi_list(self):
         rois = self.case.PatientModel.RegionsOfInterest
@@ -122,7 +132,12 @@ class Image(Patient):
         self.roi_name = roi_name
         self.roi_mask_npy = None
 
-    def get_itk_image(self, to_save=False):
+        # IRM
+        # name of the dixon IRM
+        self.dixon_name = None
+        # self.get_dixon_name()
+
+    def get_itk_image(self):
         """Return a simpleITK image object"""
         print("----> Starting CT conversion ...")
         result = np.zeros(self.n_voxels)
@@ -145,14 +160,18 @@ class Image(Patient):
         print(itk_image.GetDirection())
         return itk_image
 
-    def get_mask_from_roi(self):
+    def get_mask_from_roi(self, roi_name=None):
+
         # This method needs a roi_name
-        if self.roi_name is None:
-            raise Exception("Please, give a roi name to the Image Object if you want to use this method")
+        if roi_name is None:
+            if self.roi_name is None:
+                raise Exception("Please, give a roi name to the Image Object if you want to use this method")
+        else:
+            self.roi_name = roi_name
 
         # This method needs the creation of the itk image if not already done
         if self.image_itk is None:
-            self.image_itk = self.get_itk_image(to_save=False)
+            self.image_itk = self.get_itk_image()
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
         try:
             check_roi(self.case, self.roi_name)
@@ -200,6 +219,23 @@ class Image(Patient):
         self.roi_mask_npy = mask
         return mask
 
+    def get_dixon_name(self):
+        # todo : check if there might be more than one dixon
+        irm_list = self.get_irm_list()
+        for irm_modality in irm_list:
+            if "DIXON" in irm_modality[1]:
+                self.dixon_name = irm_modality[0]
+
+    def create_IRM_external(self):
+
+        if not check_roi(self.case, 'External'):
+            self.case.PatientModel.CreateRoi(Name=r"External", Color="Green", Type="External", TissueName=r"",
+                                             RbeCellTypeName=None, RoiMaterial=None)
+
+        self.case.PatientModel.RegionsOfInterest['External'].CreateExternalGeometry(
+            Examination=self.case.Examinations[self.dixon_name],
+            ThresholdLevel=15)
+
 
 class Fidu(Image):
     def __init__(self, exam_name, roi_name=None, threshold_abs=None, threshold_relative=None):
@@ -225,11 +261,18 @@ class Fidu(Image):
 
         else:
             self.threshold_type = 'relative'
-            self.threshold_relative = 0.6
+            self.threshold_relative = .48
             # self.threshold_value = 1600
 
+        # Fidu names in RS
+        self.fidu_prefix_names = "Fidu "
+
         # Automatic Fidu seeking
-        self.look_for_fidu()
+        # self.look_for_fidu()
+
+        # Box size (cm)
+        self.box_size = 1
+        self.radius = 1.25
 
     def find_local_max(self, image_to_process):
         s = self.fidu_size
@@ -238,13 +281,18 @@ class Fidu(Image):
         return coordinates
 
     def look_for_fidu(self, filtering=True):
+
+        # If a detection is not possible, one keeps in mind the exam name and retry it at the end
+        keep_in_mind = None
+        roi_list = None
+
         if check_roi(self.case, self.roi_name) and has_contour(self.case, self.exam_name, self.roi_name):
             print('---------------------------------------')
             print(f'\nRECHERCHE DE FIDU POUR --> {self.exam_name}\n')
             print('---------------------------------------')
             # Image Creation
             # BE CAREFUL : the first axis is inf/sup in numpy format
-            self.image_itk = self.get_itk_image(to_save=False)
+            self.image_itk = self.get_itk_image()
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
 
             if filtering:
@@ -289,8 +337,15 @@ class Fidu(Image):
             print(positions)
             # creation of POIs in RS
             self.poi_creation(positions)
+
+            # roi_list = self.create_sphere_roi()
+
+
         else:
+            keep_in_mind = str(self.exam_name)
             print(f"Please, make a contour for the roi {self.roi_name}")
+
+        return keep_in_mind, roi_list
 
     def post_processing(self, coordinates):
         print("\nPost Processing (looking for artefacts)...")
@@ -311,8 +366,8 @@ class Fidu(Image):
                 coord_new.append(coord)
         return coord_new
 
-    def post_process_distance(self, coordinates):
-        print("\nPost Processing (distance verification)...")
+    # def post_process_distance(self, coordinates):
+    #     print("\nPost Processing (distance verification)...")
 
     def get_position_from_coordinates(self, coordinates):
 
@@ -332,7 +387,7 @@ class Fidu(Image):
 
     def poi_creation(self, coordinates):
         for i, coords in enumerate(coordinates):
-            name = "Fidu " + str(i + 1)
+            name = self.fidu_prefix_names + str(i + 1)
             try:
                 # POI list creation in RS
                 self.case.PatientModel.CreatePoi(Name=name, Color="Yellow", VisualizationDiameter=1,
@@ -344,268 +399,343 @@ class Fidu(Image):
             self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
                 'x': x, 'y': z, 'z': y}
 
-class Scrollable(ttk.Frame):
-    """
-       Make a frame scrollable with scrollbar on the right.
-       After adding or removing widgets to the scrollable frame, 
-       call the update() method to refresh the scrollable area.
-    """
+    def look_in_irm(self, roi='Foie'):
 
-    def __init__(self, frame, widthsize):
+        # Roi inside which one is looking for the fidus (usually -> 'Foie')
+        input_roi = roi
 
-        vscrollbar = tk.Scrollbar(frame, width=20, orient="vertical")
-        vscrollbar.grid(row=0, column=1, sticky='ns')
+        # The Name of DIXON IRM is self.dixon_name
+        # 1- ones needs to register IRM and CT and to copy little boxes centered to the fidu and copy them to the IRM
 
-        self.canvas = tk.Canvas(frame,width=widthsize, yscrollcommand=vscrollbar.set)
-        self.canvas.grid(row=0, column=0) 
-        
-        vscrollbar.config(command=self.canvas.yview)
-        self.canvas.bind('<Configure>', self.__fill_canvas)
+        self.get_dixon_name()
 
-        # base class initialization
-        tk.Frame.__init__(self, frame)         
+        # External Creation on dixon acquisition
+        self.create_IRM_external()
 
-        # assign this obj (the inner frame) to the windows item of the canvas
-        self.windows_item = self.canvas.create_window(0,0, window=self, anchor=tk.NW)
+        # Setting CT as primary
+        self.case.Examinations[self.exam_name].SetPrimary()
+        self.case.Examinations[self.dixon_name].SetSecondary()
+
+        # Rigid registration between IRM and CT
+        self.rigid_registration(self.dixon_name, self.exam_name, self.roi_name)
+
+        # Creating little spheres
+        coord, roi_list = self.create_sphere_roi()
+
+        # Copying Rois one by one
+        for roi_name in roi_list:
+            print(roi_name)
+            print(self.exam_name)
+            self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi_name)
+
+        # Copy of the liver roi
+        self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi)
+
+        # -------------------------------------------------------
+        # FIDU CREATION
+        # -------------------------------------------------------
+        # Creating a Fidu object with dixon image as main exam attribute
+        obj_irm = Fidu(self.dixon_name)
+        # Creating an ITK image and then an associated numpy array
+        image_irm = obj_irm.get_itk_image()
+        img_npy = sitk.GetArrayFromImage(image_irm)
+
+        # Creating a mask with the input roi (usually -> Foie)
+        roi_mask = obj_irm.get_mask_from_roi(input_roi)
+
+        # Then, fidu creation for all the little rois
+        positions = []
+        for roi in roi_list:
+            image_to_process = np.copy(img_npy)
+
+            # creating mask for each roi and multiplying the image by the both masks
+            mask = obj_irm.get_mask_from_roi(roi)
+
+            image_to_process = image_to_process * mask * roi_mask
+
+            # every voxel that have zero value get max value, then invert all the value and get them positive
+            maximum = np.amax(image_to_process)
+            image_to_process[image_to_process == 0] = maximum
+            image_to_process = image_to_process * (-1) + maximum
+
+            # Applying gaussian filter
+            image_to_process = gaussian(image_to_process, sigma=0.5)
+
+            # Deleting all low values
+            maximum = np.amax(image_to_process)
+            image_to_process[image_to_process < 0.6 * maximum] = 0
+
+            # finding local max
+            coord = obj_irm.find_local_max(image_to_process)
+            position = obj_irm.get_position_from_coordinates(coord)
+            positions.append(position[0])
+
+            obj_irm.case.PatientModel.RegionsOfInterest[roi].DeleteRoi()
+
+        print(positions)
+        obj_irm.poi_creation(positions)
+        # obj_irm.create_sphere_roi()
+
+    def copy_roi(self, source, target, roi):
+        try:
+            self.case.PatientModel.CopyRoiGeometries(SourceExamination=self.case.Examinations[source],
+                                                     TargetExaminationNames=[target],
+                                                     RoiNames=[roi])
+        except:
+            print('Unable to copy the structure')
+
+    def rigid_registration(self, floating_exam, reference_exam, focus_roi):
+        # Rigid registration between floating and reference with focus_roi
+        self.case.ComputeRigidImageRegistration(FloatingExaminationName=floating_exam,
+                                                ReferenceExaminationName=reference_exam,
+                                                UseOnlyTranslations=False, HighWeightOnBones=False,
+                                                InitializeImages=True,
+                                                FocusRoisNames=[focus_roi])
+
+    def create_sphere_roi(self):
+        """ poi is a part of case.PatientModel.PointsOfInterest"""
+        coordinates, roi_list = [], []
+        for poi in self.case.PatientModel.PointsOfInterest:
+            # Work only with the fidus named 'Fidu 1" etc.
+            if self.fidu_prefix_names in poi.Name:
+                x = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.x
+                y = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.y
+                z = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.z
+                coordinates.append([x, y, z])
+                roi_name = poi.Name + '_roi'
+                roi_list.append(roi_name)
+
+                try:
+                    self.case.PatientModel.CreateRoi(Name=roi_name, Color="Yellow", Type="Marker", TissueName=None,
+                                                     RbeCellTypeName=None, RoiMaterial=None)
+                except:
+                    print(f'{roi_name} already exists!')
+
+                self.case.PatientModel.RegionsOfInterest[roi_name].CreateSphereGeometry(
+                    Radius=self.radius, Examination=self.case.Examinations[self.exam_name],
+                    Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
+        return coordinates, roi_list
 
 
-    def __fill_canvas(self, event):
-        "Enlarge the windows item to the canvas width"
+class TkFOR(tkinter.Tk):
+    def __init__(self, patient_object, roi):
 
-        canvas_width = event.width
-        self.canvas.itemconfig(self.windows_item, width = canvas_width)        
-
-    def update(self):
-        "Update the canvas and the scrollregion"
-
-        self.update_idletasks()
-        self.canvas.config(scrollregion=self.canvas.bbox(self.windows_item))
-    
+        tkinter.Tk.__init__(self)
         
-class TkFOR(tk.Tk):
-    def __init__(self, patient, roi):
+        ## Liste de rois
+        self.roi = roi
         
-        tk.Tk.__init__(self)
-        
-        self.rowNumber = 0
-        self.rowNumberMax = 4
-        self.fr2_rowNumber = 0
+        ## Info Patient 
+        self.patient = patient_object
+        self.list = self.patient.get_ct_list()
         
         
-        ## Creer une instance Patient
-        self.patient = patient
+        self.main_exam = None
+        self.roi_list = []
         
-        ## Récupère la liste des examens
-        self.examinationList = self.patient.get_ct_list()
-        # self.examinationList = ["4D  40%","4D  60%","2021.04.28  50% Contourage Foie","2021.04.28 PORTAL / MNI","dosimétrie"]
-        
-        ## Passer en argument pour pouvoir choisir les structures dans le main
-        self.roiList = roi
-        
-        ## Dictionnaire pour les chekbutton des Roi
-        self.roiDict = {}
-        
-        ## Liste pour stocker les dictionnaires des examens en fonction des Roi
-        self.roiExamList = []
-        
-        ## Liste pour stocker les Roi cochées
-        self.activatedRoiList = []
-        
-        ## Liste pour stocker les dictionnaires des examens en fonction des Roi
-        self.checkRegistrationForLiver = IntVar()
-        
-        ## Creation des différents dictionnaires pour le stockage des variables de checkbutton
+        ## Dictionnaire (nomexam + IntVar (tk 1/0) + init
+        self.examDict = {}
         self.__createDict()
-
-        ## Creation des widgets
-        self.__createMainWidgets()
         
+        ## Recherche IRM
+        self.checkForIRM = IntVar()
+        
+        self.__createWidgets()
+
     def __createDict(self):
-        for roi in self.roiList :
-            self.roiDict[roi] = IntVar()
-            examDict = {}
-            for exam in self.examinationList:
-                examDict[exam] = IntVar()
-            self.roiExamList.append(examDict)
- 
-    def __delete_frame(self, frame):
-        for widget in frame.winfo_children():
-            widget.grid_forget() 
-
+        # todo : roialgebra pour copy roi en Foie_rechercheFidu pour script et suppression a la fin
     
-    def __returnActivatedRoi(self) :
-        roiList = [] 
-        for r, (roi, v) in enumerate(self.roiDict.items()): 
-            if self.roiDict[roi].get() == 1:
-                roiList.append((r,roi))       
-        return roiList 
+         # todo : trier le dictionnaire en fonction des fidus dédoubles 
+        # for exam in self.list :
+            # if 50% : 
+                # list 50 = []
+            # else : 
+                # list.append(exam)
+        # self.sublist = list50 + list
         
-    def __create_examChecked(self,roiNumber,widget):
-    
-    ## Initialisation des variables pour la mise en page
-        self.fr2_rowNumber +=1
-       
-    ## Case à cocher pour la sélection des ROIs        
-        for i, (image, image_value) in enumerate(self.roiExamList[roiNumber].items()): 
-            
-            if has_contour(self.patient.case, image, self.activatedRoiList[roiNumber][1]) and "Dosi" not in image.capitalize():
-                color = 'red'
-                size = "12"
-                self.checkbutton2 = Checkbutton(widget, text=image, variable=self.roiExamList[self.activatedRoiList[roiNumber][0]][image], onvalue=1, offvalue=0,
-                                       justify="center", font=('Arial', size), fg=color)
-                self.checkbutton2.grid(column=0, row=self.fr2_rowNumber, sticky=W, padx=20)
-            else:
-                color = 'black'
-                size = "9"
-                self.checkbutton2 = Checkbutton(widget, text=image, variable=self.roiExamList[self.activatedRoiList[roiNumber][0]][image], onvalue=1, offvalue=0,
-                                       justify="center", font=('Arial', size), fg=color,state=DISABLED)
-                self.checkbutton2.grid(column=0, row=self.fr2_rowNumber, sticky=W, padx=20)
-                         
-            
-            self.fr2_rowNumber += 1
-
-            
-    def __callBack_roiChecked(self):
-    
-        self.activatedRoiList = self.__returnActivatedRoi()       
+        # Pour le groupe 4D : u moins 1 4D avec contours
+        # Projette sur tout le monde 
+        # regarde qui n'est pas dedouble 
         
-        ### Detruit tout le frame 2 lorsqu'aucune case n'est coché
-        if len(self.activatedRoiList) == 0 : 
-            self.__delete_frame(self.Frame2)
-            self.Frame2.grid_forget()
- 
-        ### Crée le Frame2 et le rempli en fonction de ROI activé
-        else :
-           
-            ## Efface et recrée un frame 2 vide 
-            self.__delete_frame(self.Frame2)
-            self.Frame2.grid_forget()
-            
-            
-            ## Creation de la place pour le Frame 2
-            self.Frame2 = Frame(self, width = 800, height = 100,  relief=GROOVE)
-            self.scrollable_frame2 = Scrollable(self.Frame2, 600)
-            
-            ## Boucle uniquement sur les structures activées
-            # fr2_columnNumber = 0
-
-            
-            self.fr2_rowNumber = 0
-            
-            for r in range (0,len(self.activatedRoiList)) : 
-                    
-                # label2 = Label(self.scrollable_frame2, text="Sélectionner les images pour la structure "+ str(self.activatedRoiList[r][1]),
-                           # font=('Arial', '10'))
-                labelText = str(self.activatedRoiList[r][1]) + " : Choisir le/les CTS à analyser (NB: la structure doit être contouré)"
-                print(labelText)
-                label2 = Label(self.scrollable_frame2, text=labelText,
-                           font=('Arial', '14'))
-                label2.grid(row = self.fr2_rowNumber, column=0, sticky='w')
-                
-                self.__create_examChecked(r,self.scrollable_frame2)
-
-                # if (self.activatedRoiList[r][1] == "Foie") :
-                    
-                    # label_Foie = Label(self.scrollable_frame2, text="Réaliser les recalages entre les différentes séries d'images sélectionnées : ",
-                               # font=('Arial', '10'),justify="center")
-                    # label_Foie.grid(row = self.fr2_rowNumber, column=0, sticky='nws',padx = 10)
-                    
-                    # checkbutton_Foie = Checkbutton(self.scrollable_frame2, text = ' ', variable=self.checkRegistrationForLiver ,
-                               # font=('Arial', '10'),justify="center")                               
-                    # checkbutton_Foie.grid(row = self.fr2_rowNumber, column=0,sticky='nes')
-                    # self.fr2_rowNumber +=1
-
-            self.Frame2.grid(row=1, column=0,sticky='n')
-            self.scrollable_frame2.update()
-            
-    def __createMainWidgets(self):
-
-        #### Titre de la fenêtre Tkinter
-        self.title("Recherche de fiduciels")
-        
-        #### Initialisation des frames (sous structures de la fenêtre)
- 
-        ## Frame pour la sélection des structures
-        self.Frame1 = Frame(self, width = 800, height = 200, relief=GROOVE)
-        self.Frame1.grid(row=0, column=0,sticky='n')
-       
-        ## Frame pour la sélection des images en fonction des structures cochées
-        self.Frame2 = Frame(self, width = 800, height = 10,  relief=GROOVE)
-        self.Frame2.grid(row=2, column=0,sticky='n')
-        
-
-        ## Frame pour les boutons
-        self.Frame3 = Frame(self, width = 800, height = 20, relief=GROOVE)
-        self.Frame3.grid(row=3, column=0,sticky='s')
-        
-        
-        #### Creation des widgets 
-        
-        ## Titre
-        # self.label = Label(self.Frame1, text="Sélectionner les ROIs puis les images pour la recherche de fiduciels",
-                           # font=('Arial', '16'))
-        self.label = Label(self.Frame1, text="Recherche de Fiduciels",
-                           font=('Arial', '16'))
-        self.label.grid(row=self.rowNumber, column=0, columnspan=(len(self.roiList) // self.rowNumberMax + 1),ipady =10, ipadx = 10)
-
-        ## Case à cocher pour la sélection des ROIs   
-        ## Changer pour fixer à 3 colonnes ou 4 plutot qu'un nombre de ligne
-        for i, (roi, v) in enumerate(self.roiDict.items()):  
-            self.rowNumber = 1 + (i)% self.rowNumberMax
-            self.columnNumber = (i) // self.rowNumberMax
-            self.checkbutton  = Checkbutton(self.Frame1, text=roi, variable=self.roiDict[roi], onvalue=1, offvalue=0,
-                                       justify="center", font=('Arial', "9"), fg='black', command = self.__callBack_roiChecked)
-            ## Permet de directement sélectionner la structure et d'afficher les séries
-            if(roi=="Foie") :
-                self.checkbutton.invoke()
-                # self.checkbutton.grid(column=self.columnNumber, row=self.rowNumber, sticky=W, padx=20)
-            else : 
-                self.checkbutton.grid(column=self.columnNumber, row=self.rowNumber, sticky=W, padx=20)
-        
-        ## Bouton d'exécution
-        self.runButton = Button(self.Frame3, text='Recherche des fiduciels', command=self.__execute)
-        self.runButton.grid(column=0, row=0, padx=20 , pady=5)
-
-        ## Bouton d'annulation
-        self.cancelButton = Button(self.Frame3, text='Annuler', command=self.__end)
-        self.cancelButton.grid(column=1, row=0, padx=20 , pady=5)
+        for exam in self.list:
+            self.examDict[exam] = IntVar()
 
     def __execute(self):
-        for i, (roi, v) in enumerate(self.roiDict.items()):  
-            if self.roiDict[roi].get() == 1 :
-                # print(roi)
-                for image in self.roiExamList[i] :
-                    if self.roiExamList[i][image].get() == 1 :
-                        # Fidu(str(image), self.roi)
-                        Fidu(str(image), roi)
-                        # print(roi," - ",str(image)) 
-                        
-                if roi == 'Foie' and self.checkRegistrationForLiver.get() == 1 :
-                    print("Les recalages vont être effectués")
+        compteur = 0
+        kept_in_mind = []
+        for image in self.examDict:
+        
+       
+
+            if self.examDict[image].get() == 1:
+                fid = Fidu(str(image), self.roi)
+
+                # Recherche des fiduciels dans les CT
+                # If a detection is not possible (no roi contoured), one keeps in mind the exam name -> res
+                res, self.roi_list = fid.look_for_fidu()
+
+                if res:
+                    kept_in_mind.append(res)
+                # -----------------------------------------------------
+                # Recherche des fiduciels dans l'IRM à partir du CT 4D
+                # -----------------------------------------------------
+                # if the irm was already registered, it's not done an other time
+                if '%' in image and compteur == 0:
+                    compteur += 1
+                    self.main_exam = str(image)
+                    fid_irm = Fidu(image, self.roi)
+                    try:
+                        fid_irm.look_in_irm(self.roi)
+                    except:
+                        print("Impossible de trouver les fidus sur l'irm. Voir logs")
+
+        for image in kept_in_mind:
+            try:
+                print(f'main exam {self.main_exam}')
+                print(f'kept in mind {image}')
+
+                fid = Fidu(str(image), self.roi)
+
+                fid.rigid_registration(floating_exam=image, reference_exam=self.main_exam, focus_roi=self.roi)
+                fid.copy_roi(source=self.main_exam, target=image, roi=self.roi)
+                fid.look_for_fidu()
+
+            except:
+                print('problem with kept in mind')
+
+        # if self.checkForIRM.get() == 1 :
+            # print("Recherche sur IRM")
+            # do IRM fidu
+            
+        # todo: remettre les delete
+        # todo: trouver un moyen de recaler
         self.quit()
 
     def __end(self):
         self.quit()
+
+    def __createWidgets(self):
+
+        # Objects creation
+        self.title("Recherche de fiduciels")
+        
+        # Initialisation des frames (sous structures de la fenêtre)
+ 
+        # Frame pour la sélection des structures
+        self.Frame1 = Frame(self, width = 800, height = 200, relief=GROOVE)
+        self.Frame1.grid(row=0, column=0,sticky='n')
+       
+        # Frame pour la sélection des images en fonction des structures cochées
+        self.Frame2 = Frame(self, width = 800, height = 10,  relief=GROOVE)
+        self.Frame2.grid(row=1, column=0,sticky='n')
+        
+
+        # Frame pour l'IRM
+        bgIRM = "Gray"
+        self.Frame3 = Frame(self, width = 800, height = 20, relief=GROOVE,bg = bgIRM)
+        self.Frame3.grid(row=2, column=0,sticky='s')
+        
+        # Frame pour les boutons
+        self.Frame4 = Frame(self, width = 800, height = 20, relief=GROOVE)
+        self.Frame4.grid(row=3, column=0,sticky='s')
+        
+        
+        # Titre de la fenêtre
+        self.label = Label(self.Frame1, text="Choisir le/les CTS à analyser\n (NB: le Foie doit être contouré sur un scan "
+                                      "4D) \n",
+                           font=('Arial', '16'))
+        self.label.grid(row=0, column=0)
+
+        compteur = 0
+        rowNumber = 0
+        for image in self.examDict:
+            txt = ""
+            if has_contour(self.patient.case, image, self.roi) and not any(word in image.lower() for word in ['dosi', '1mm']):
+                color = 'red'
+                size = "12"
+                txt = '-> Examen de référence : ' + str(image)
+                self.checkbutton = Checkbutton(self.Frame2, text=txt, variable=self.examDict[image], onvalue=1, offvalue=0,
+                                           justify="center", font=('Arial', size), fg=color)
+                self.checkbutton.grid(column=0, row=rowNumber, sticky=W, padx=20)
+                self.checkbutton.select()
+                rowNumber += 1
+                # # primary or secondary setting for registration
+                # print(f'Setting {image} as primary')
+                # self.patient.case.Examinations[image].SetPrimary()
+
+            elif has_contour(self.patient.case, image, self.roi) and ("%" not in image) and (
+                    "dosi" not in image.lower()) and ("1mm" not in image.lower()):
+                color = 'red'
+                size = "12"
+                txt = '-> Foie contouré (calcul rapide) : ' + str(image)
+                compteur += 1
+                self.checkbutton = Checkbutton(self.Frame2, text=txt, variable=self.examDict[image], onvalue=1, offvalue=0,
+                                           justify="center", font=('Arial', size), fg=color)
+                self.checkbutton.grid(column=0, row=rowNumber, sticky=W, padx=20)
+                # print(f'Setting {image} as secondary')
+                # self.patient.case.Examinations[image].SetSecondary()
+                rowNumber += 1
+                
+            elif compteur == 0 and (any(word in image.lower() for word in ['tard', 'port', 'arter']) or not has_contour(
+                    self.patient.case, image, self.roi)):
+                compteur += 1
+                color = 'green'
+                size = "12"
+                txt = '-> Conseillé : ' + str(image)
+                self.checkbutton = Checkbutton(self.Frame2, text=txt, variable=self.examDict[image], onvalue=1, offvalue=0,
+                                           justify="center", font=('Arial', size), fg=color)
+                self.checkbutton.grid(column=0, row=rowNumber, sticky=W, padx=20)
+                rowNumber += 1
+                
+            elif "dosi" in image.lower() or "1mm" in image.lower():
+                color = 'grey'
+                size = "8"
+                txt = '-> Déconseillé : ' + str(image)
+                self.checkbutton = Checkbutton(self.Frame2, text=txt, variable=self.examDict[image], onvalue=1, offvalue=0,
+                                           justify="center", font=('Arial', size), fg=color)
+                self.checkbutton.grid(column=0, row=rowNumber, sticky=W, padx=20)
+                rowNumber += 1
+                
+            elif not (has_contour(self.patient.case, image, self.roi)) and ("%" in image):
+                color = 'grey'
+                size = "8"
+                txt = '-> Impossible : ' + str(image)
+                self.checkbutton = Checkbutton(self.Frame2, text=txt, variable=self.examDict[image], onvalue=1, offvalue=0,
+                                           justify="center", font=('Arial', size), fg=color,state=DISABLED)
+                self.checkbutton.grid(column=0, row=rowNumber, sticky=W, padx=20)
+                rowNumber += 1
+                
+            else:
+                color = 'black'
+                size = "9"
+                txt = str(image)
+                self.checkbutton = Checkbutton(self.Frame2, text=txt, variable=self.examDict[image], onvalue=1, offvalue=0,
+                                           justify="center", font=('Arial', size), fg=color)
+                self.checkbutton.grid(column=0, row=rowNumber, sticky=W, padx=20)
+                rowNumber += 1
+
+        # Recherche IRM
+        label_IRM = Label(self.Frame3, text="Réaliser la recherche sur l'IRM : ",
+                   font=('Arial', '10'),justify="center",bg = bgIRM)
+        label_IRM.grid(row = 0, column=0, sticky='nws',padx = 10)
+        
+        checkbutton_Foie = Checkbutton(self.Frame3, text = ' ', variable=self.checkForIRM ,
+                   font=('Arial', '10'),justify="center",bg = bgIRM)                               
+        checkbutton_Foie.grid(row = 0, column=1,sticky='nes')
+            
+        # Boutons
+        self.runButton = Button(self.Frame4, text='Recherche des fiduciels', command=self.__execute)
+        self.runButton.grid(column=0, row=0, padx=20 , pady=5)
+
+        self.cancelButton = Button(self.Frame4, text='Annuler', command=self.__end)
+        self.cancelButton.grid(column=1, row=0, padx=20 , pady=5)
+
 
 if __name__ == '__main__':
     # ----- Patient -----
     # Creating patient object
     patient = Patient()
 
-    # Creating a list containing all the examination names
-    # examinations = patient.get_examination_list()
-    # roi = patient.get_roi_list()
-    
-    examinations = ["4D  40%","4D  60%","2021.04.28  50% Contourage Foie","2021.04.28 PORTAL / MNI","dosimétrie"]
-    # examinations = ["4D  40%","4D  60%","2021.04.28  50% Contourage Foie","2021.04.28 PORTAL / MNI","dosimétrie"]
-    
-    roi = ["Foie","Duodenum","Colon","Estomac","Coeur"]
-    # roi = patient.get_roi_list()
-
     # tkinter
-    app = TkFOR(patient, ['Foie'])
-    # app = TkFOR(roi)
+    app = TkFOR(patient, 'Foie')
     app.mainloop()
-
-    # Creating Fidu object
-    # fidu = Fidu('4D  60%', 'Foie')
