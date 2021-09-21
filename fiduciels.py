@@ -9,6 +9,8 @@ from skimage.draw import polygon2mask
 from skimage.feature import peak_local_max
 from skimage.filters import gaussian
 
+from easygui import *
+
 
 # todo : use the center of mass and not only the maximum
 # ----------------------------------------------------
@@ -50,6 +52,10 @@ class Patient:
         self.examination_names = []
         self.irm_names = []
         self.roi_list = []
+        self.dixon_name = []
+        self.get_dixon_name()
+        self.patient_id = self.patient.PatientID
+        self.roi = None
 
     def get_ct_list(self):
         for exam in self.case.Examinations:
@@ -66,10 +72,81 @@ class Patient:
         self.irm_names = list(zip(name, modality))
         return self.irm_names
 
+    def get_dixon_name(self):
+        irm_list = self.get_irm_list()
+        for irm_modality in irm_list:
+            if "DIXON" in irm_modality[1]:
+                self.dixon_name.append(irm_modality[0])
+                print(irm_modality[0])
+        return self.dixon_name
+
     def get_roi_list(self):
         rois = self.case.PatientModel.RegionsOfInterest
         self.roi_list = [roi.Name for roi in rois]
         return self.roi_list
+
+    def get_description(self, imageName):
+        description = self.case.Examinations[imageName].GetStoredDicomTagValueForVerification(Group=0x0008,
+                                                                                              Element=0x103E)
+        description = description.__getitem__("SeriesDescription")
+        return description
+
+    def sort_acquisitions(self, roi):
+        """This method takes all the acquisition names and sorts them
+            - to do = images of interest containing a roi contour
+            - to do after = images of interest without contour
+            - not do to = no interest"""
+        self.roi = roi
+
+        # First creates a list containing all the acquisitions
+        images = self.get_ct_list()
+
+        # lists initialization
+        to_do_now = []
+        to_do_after = []
+        not_to_do = []
+
+        # Au début, je fais une premiere boucle for pour trier les CT. Pour que le CT 50% soit le premier de la
+        # liste, tant que ce n'est pas lui, je fais passer les autres CT en fin de liste. La nouvelle recherche se
+        # fera avec lui en premier
+
+        index = 0
+        for index, image in enumerate(images):
+            if not has_contour(self.case, image, self.roi):
+                images.append(image)
+            else:
+                break
+
+        # STARTING THE REAL LOOP
+        new_images = images[index:]
+        for image in new_images:
+            if has_contour(self.case, image, self.roi) and not any(
+                    word in image.lower() for word in ['dosi', '1mm']):
+                # to_do_now.append((image, self.get_description(image)))
+                to_do_now.append(image)
+
+            elif has_contour(self.case, image, self.roi) and ("%" not in image) and (
+                    "dosi" not in image.lower()) and ("1mm" not in image.lower()):
+                # to_do_now.append((image, self.get_description(image)))
+                to_do_now.append(image)
+
+            elif any(word in image.lower() for word in ['tard', 'port', 'arter', 'inj']):
+                # to_do_after.append((image, self.get_description(image)))
+                to_do_after.append(image)
+
+            elif any(word in image.lower() for word in ['tard', 'port', 'arter', 'inj']):
+                # to_do_after.append((image, self.get_description(image)))
+                to_do_after.append(image)
+
+            else:
+                # not_to_do.append((image, self.get_description(image)))
+                not_to_do.append(image)
+
+        # at the end, if there are mri's, we take them
+        if self.dixon_name:
+            for dixon in self.dixon_name:
+                to_do_after.append(dixon)
+        return to_do_now, to_do_after, not_to_do
 
 
 class Image(Patient):
@@ -132,10 +209,10 @@ class Image(Patient):
         self.roi_name = roi_name
         self.roi_mask_npy = None
 
-        # IRM
-        # name of the dixon IRM
-        self.dixon_name = None
-        # self.get_dixon_name()
+        # # IRM
+        # # name of the dixon IRM
+        # self.dixon_name = None
+        # # self.get_dixon_name()
 
     def get_itk_image(self):
         """Return a simpleITK image object"""
@@ -219,17 +296,30 @@ class Image(Patient):
         self.roi_mask_npy = mask
         return mask
 
-    def get_dixon_name(self):
-        # todo : check if there might be more than one dixon
-        irm_list = self.get_irm_list()
-        for irm_modality in irm_list:
-            if "DIXON" in irm_modality[1]:
-                self.dixon_name = irm_modality[0]
-
     def create_IRM_external(self):
+
+        if not check_roi(self.case, 'External'):
+            self.case.PatientModel.CreateRoi(Name=r"External", Color="Green", Type="External", TissueName=r"",
+                                             RbeCellTypeName=None, RoiMaterial=None)
+
         self.case.PatientModel.RegionsOfInterest['External'].CreateExternalGeometry(
             Examination=self.case.Examinations[self.dixon_name],
             ThresholdLevel=15)
+
+        # if '%' in image and compteur == 0:
+        #     compteur += 1
+        #     self.main_exam = str(image)
+        #     fid_irm = Fidu(image, self.roi)
+        #     try:
+        #         fid_irm.look_in_irm(self.roi)
+        #     except:
+        #         print("Impossible de trouver les fidus sur l'irm. Voir logs")
+    # def generate_drr(self):
+    #     ANGLES = [120, 90, 60]
+    #     SAD = 600
+    #     SDD = 1100
+    #     GANTRYAXIS = [1, 0, 0]
+    #     INPLANEANGLE = -90
 
 
 class Fidu(Image):
@@ -256,7 +346,7 @@ class Fidu(Image):
 
         else:
             self.threshold_type = 'relative'
-            self.threshold_relative = 0.55
+            self.threshold_relative = .48
             # self.threshold_value = 1600
 
         # Fidu names in RS
@@ -267,7 +357,7 @@ class Fidu(Image):
 
         # Box size (cm)
         self.box_size = 1
-        self.radius = 1
+        self.radius = 1.25
 
     def find_local_max(self, image_to_process):
         s = self.fidu_size
@@ -275,10 +365,11 @@ class Fidu(Image):
         coordinates = peak_local_max(image_to_process, min_distance=s, footprint=footprint)
         return coordinates
 
-    def look_for_fidu(self, filtering=True, semi_auto=False):
+    def look_for_fidu(self, filtering=True):
 
         # If a detection is not possible, one keeps in mind the exam name and retry it at the end
         keep_in_mind = None
+        roi_list = None
 
         if check_roi(self.case, self.roi_name) and has_contour(self.case, self.exam_name, self.roi_name):
             print('---------------------------------------')
@@ -303,7 +394,8 @@ class Fidu(Image):
             # Applying mask using structure:
             self.get_mask_from_roi()
             image_to_process = image_to_process * self.roi_mask_npy
-            # this attribute is used by post processing
+
+            # this attribute is used by post processing (it needs to have all the information for hist creation)
             self.image_to_process = np.copy(image_to_process)
 
             # thresholding
@@ -320,7 +412,7 @@ class Fidu(Image):
             coordinates = self.find_local_max(image_to_process)
 
             # post processing
-            coordinates = self.post_processing(coordinates)
+            coordinates, thrown_away = self.post_processing(coordinates)
 
             # Converting coordinates to positions (in mm)
             positions = self.get_position_from_coordinates(coordinates)
@@ -331,34 +423,64 @@ class Fidu(Image):
             print(positions)
             # creation of POIs in RS
             self.poi_creation(positions)
+
         else:
             keep_in_mind = str(self.exam_name)
             print(f"Please, make a contour for the roi {self.roi_name}")
 
-        if keep_in_mind:
-            return keep_in_mind
+        return keep_in_mind, roi_list
 
     def post_processing(self, coordinates):
-        print("\nPost Processing (looking for artefacts)...")
-        s = self.fidu_size
 
+        # todo : modifier le post processing pour recherche dans une sphere
+        print("\nPost processing (looking for artefacts)...")
+        s = self.fidu_size
         coord_new = []
+        thrown_away = []
         for index, coord in enumerate(coordinates):
-            i = coord[0]
-            j = coord[1]
-            k = coord[2]
+            i, j, k = coord
             matrix = self.image_to_process[i - s:i + s,
                      j - s:j + s,
                      k - s:k + s]
             hist, bin_edges = np.histogram(matrix, bins=[-1500, -200, self.threshold_value, self.maximum])
             print(hist)
-            if (hist[0] > 0) and (hist[2] < 100):
+
+            # todo: check if hist[2] is needed or not
+            if hist[0] > 0:  # and (hist[2] < 100):
                 print("-> La tache numéro : " + str(index + 1) + " contient des artefacts!\n")
                 coord_new.append(coord)
-        return coord_new
+            else:
+                thrown_away.append(coord)
 
-    # def post_process_distance(self, coordinates):
-    #     print("\nPost Processing (distance verification)...")
+            ###############################################
+            # cv2 imshow
+            ###############################################
+            # creating image
+            # img = self.image_to_process[i - 3 * s:i + 3 * s, j - 3 * s: j + 3 * s, k]
+            # print(img.min())
+            # img = (img + img.min())
+            # img = img / img.max()
+            # img = img * 255
+            # img = np.array(img, dtype=np.uint8)
+            #
+            # scale_percent = 2000  # percent of original size
+            # width = int(img.shape[1] * scale_percent / 100)
+            # height = int(img.shape[0] * scale_percent / 100)
+            # dim = (width, height)
+            #
+            # # resize image
+            # resized = cv2.resize(img, dim, interpolation=cv2.INTER_AREA)
+            #
+            # directory = r"\\Client\X$\DEV\Fiduciels\images"
+            # filename = str(self.patient_id) + '_' + self.case.CaseName + '_' + str(index) + '.jpg'
+            # print(filename)
+            #
+            # cv.imwrite(os.path.join(directory, filename), img)
+            #
+            # cv.imshow("Est-ce un fiduciel?", resized)
+            # cv.waitKey(0)
+
+        return coord_new, thrown_away
 
     def get_position_from_coordinates(self, coordinates):
 
@@ -390,10 +512,10 @@ class Fidu(Image):
             self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
                 'x': x, 'y': z, 'z': y}
 
-    def look_in_irm(self, roi='Foie'):
+    def look_in_irm(self):
 
         # Roi inside which one is looking for the fidus (usually -> 'Foie')
-        input_roi = roi
+        input_roi = self.roi_name
 
         # The Name of DIXON IRM is self.dixon_name
         # 1- ones needs to register IRM and CT and to copy little boxes centered to the fidu and copy them to the IRM
@@ -410,33 +532,14 @@ class Fidu(Image):
         # Rigid registration between IRM and CT
         self.rigid_registration(self.dixon_name, self.exam_name, self.roi_name)
 
-        # Copying ROIs from CT to IRM
-        roi_list = []
-        coordinates = []
-        for poi in self.case.PatientModel.PointsOfInterest:
+        # Creating little spheres
+        coord, roi_list = self.create_sphere_roi()
 
-            # Work only with the fidus named 'Fidu 1" etc.
-            if self.fidu_prefix_names in poi.Name:
-                x = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.x
-                y = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.y
-                z = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.z
-                coordinates.append([x, y, z])
-
-                roi_name = poi.Name + '_roi'
-                roi_list.append(roi_name)
-
-                try:
-                    self.case.PatientModel.CreateRoi(Name=roi_name, Color="Yellow", Type="Marker", TissueName=None,
-                                                     RbeCellTypeName=None, RoiMaterial=None)
-                except:
-                    print(f'{roi_name} already exists!')
-
-                self.case.PatientModel.RegionsOfInterest[roi_name].CreateSphereGeometry(
-                    Radius=self.radius, Examination=self.examination,
-                    Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
-
-                # Copying Rois one by one
-                self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi_name)
+        # Copying Rois one by one
+        for roi_name in roi_list:
+            print(roi_name)
+            print(self.exam_name)
+            self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi_name)
 
         # Copy of the liver roi
         self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi)
@@ -484,6 +587,7 @@ class Fidu(Image):
 
         print(positions)
         obj_irm.poi_creation(positions)
+        # obj_irm.create_sphere_roi()
 
     def copy_roi(self, source, target, roi):
         try:
@@ -499,45 +603,119 @@ class Fidu(Image):
                                                 ReferenceExaminationName=reference_exam,
                                                 UseOnlyTranslations=False, HighWeightOnBones=False,
                                                 InitializeImages=True,
-                                                FocusRoisNames=[focus_roi], RegistrationName=None)
+                                                FocusRoisNames=[focus_roi])
+
+    def create_sphere_roi(self):
+        """ poi is a part of case.PatientModel.PointsOfInterest"""
+        coordinates, roi_list = [], []
+        for poi in self.case.PatientModel.PointsOfInterest:
+            # Work only with the fidus named 'Fidu 1" etc.
+            if self.fidu_prefix_names in poi.Name:
+                x = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.x
+                y = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.y
+                z = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.z
+                coordinates.append([x, y, z])
+                roi_name = poi.Name + '_roi'
+                roi_list.append(roi_name)
+
+                try:
+                    self.case.PatientModel.CreateRoi(Name=roi_name, Color="Yellow", Type="Marker", TissueName=None,
+                                                     RbeCellTypeName=None, RoiMaterial=None)
+                except:
+                    print(f'{roi_name} already exists!')
+
+                self.case.PatientModel.RegionsOfInterest[roi_name].CreateSphereGeometry(
+                    Radius=self.radius, Examination=self.case.Examinations[self.exam_name],
+                    Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
+        return coordinates, roi_list
+
+    def create_roi(self, roi_name, color='Black', Type="Undefined"):
+
+        if not check_roi(self.case, roi_name):
+            try:
+                self.case.PatientModel.CreateRoi(Name=roi_name, Color=color, Type=Type, TissueName=None,
+                                                 RbeCellTypeName=None, RoiMaterial=None)
+            except:
+                print('Unable to create this structure! ')
+
+    def create_wall(self, OutwardDistance=1, InwardDistance=0):
+
+        # create roi if needed
+        out_roi = self.roi_name + '_wall'
+        self.create_roi(out_roi, color='Pink')
+
+        # create wall
+        res = self.case.PatientModel.RegionsOfInterest[out_roi].SetWallExpression(SourceRoiName=self.roi_name,
+                                                                                  OutwardDistance=OutwardDistance,
+                                                                                  InwardDistance=InwardDistance)
+        res.UpdateDerivedGeometry(Examination=self.examination, Algorithm="Auto")
+
+    def create_margin(self, distance=1):
+
+        # create roi if needed
+        out_roi = self.roi_name + ' + ' + str(distance)
+        self.create_roi(out_roi, color='Grey')
+
+        res = self.case.PatientModel.RegionsOfInterest[out_roi].SetMarginExpression(SourceRoiName=self.roi_name,
+                                                                                    MarginSettings={'Type': "Expand",
+                                                                                                    'Superior': distance,
+                                                                                                    'Inferior': distance,
+                                                                                                    'Anterior': distance,
+                                                                                                    'Posterior': distance,
+                                                                                                    'Right': distance,
+                                                                                                    'Left': distance})
+
+        res.UpdateDerivedGeometry(Examination=self.examination, Algorithm="Auto")
 
 
 class TkFOR(tkinter.Tk):
     def __init__(self, patient_object, roi):
 
         tkinter.Tk.__init__(self)
+
         self.roi = roi
         self.patient = patient_object
         self.list = self.patient.get_ct_list()
         self.main_exam = None
         self.examDict = {}
+        self.roi_list = []
+
+        self.IRM_detection = IntVar()
         self.__createDict()
         self.__createWidgets()
 
     def __createDict(self):
+
+        # first sorting
         for exam in self.list:
             self.examDict[exam] = IntVar()
 
     def __execute(self):
+        compteur = 0
         kept_in_mind = []
         for image in self.examDict:
+
             if self.examDict[image].get() == 1:
                 fid = Fidu(str(image), self.roi)
+
                 # Recherche des fiduciels dans les CT
-                res = fid.look_for_fidu()
+                # If a detection is not possible (no roi contoured), one keeps in mind the exam name -> res
+                res, self.roi_list = fid.look_for_fidu()
 
+                if res:
+                    kept_in_mind.append(res)
+                # -----------------------------------------------------
                 # Recherche des fiduciels dans l'IRM à partir du CT 4D
-                if '%' in image:
+                # -----------------------------------------------------
+                # if the irm was already registered, it's not done an other time
+                if '%' in image and compteur == 0:
+                    compteur += 1
                     self.main_exam = str(image)
+                    fid_irm = Fidu(image, self.roi)
                     try:
-
-                        fid_irm = Fidu(image, self.roi)
                         fid_irm.look_in_irm(self.roi)
                     except:
                         print("Impossible de trouver les fidus sur l'irm. Voir logs")
-
-                else:
-                    kept_in_mind.append(res)
 
         for image in kept_in_mind:
             try:
@@ -553,6 +731,8 @@ class TkFOR(tkinter.Tk):
             except:
                 print('problem with kept in mind')
 
+        # todo: remettre les delete
+        # todo: trouver un moyen de recaler
         self.quit()
 
     def __end(self):
@@ -577,37 +757,42 @@ class TkFOR(tkinter.Tk):
             rowNumber += 1
             columnNumber = columnNumber + rowNumber // rowNumberMax
 
-            if has_contour(self.patient.case, image, self.roi) and ("%" in image) and (
-                    "Dosi" not in image.capitalize()):
+            if has_contour(self.patient.case, image, self.roi) and not any(
+                    word in image.lower() for word in ['dosi', '1mm']):
                 color = 'red'
                 size = "12"
-                txt = '-> Indispensable : ' + str(image)
+                txt = '-> Examen de référence : ' + str(image)
 
                 # # primary or secondary setting for registration
                 # print(f'Setting {image} as primary')
                 # self.patient.case.Examinations[image].SetPrimary()
 
             elif has_contour(self.patient.case, image, self.roi) and ("%" not in image) and (
-                    "Dosi" not in image.capitalize()):
+                    "dosi" not in image.lower()) and ("1mm" not in image.lower()):
                 color = 'red'
                 size = "12"
-                txt = '-> Foie contouré : ' + str(image)
+                txt = '-> Foie contouré (calcul rapide) : ' + str(image)
                 compteur += 1
 
                 # print(f'Setting {image} as secondary')
                 # self.patient.case.Examinations[image].SetSecondary()
 
-            elif compteur == 0 and any(word in image.lower() for word in ['tard', 'port', 'arter']) and not has_contour(
-                    self.patient.case, image, self.roi):
+            elif compteur == 0 and (any(word in image.lower() for word in ['tard', 'port', 'arter']) or not has_contour(
+                    self.patient.case, image, self.roi)):
                 compteur += 1
                 color = 'green'
                 size = "12"
                 txt = '-> Conseillé : ' + str(image)
 
-            elif "Dosi" in image.capitalize():
+            elif "dosi" in image.lower() or "1mm" in image.lower():
                 color = 'grey'
                 size = "8"
                 txt = '-> Déconseillé : ' + str(image)
+
+            elif not (has_contour(self.patient.case, image, self.roi)) and ("%" in image):
+                color = 'grey'
+                size = "8"
+                txt = '-> Impossible : ' + str(image)
 
             else:
                 color = 'black'
@@ -629,10 +814,39 @@ class TkFOR(tkinter.Tk):
 
 
 if __name__ == '__main__':
+    # roi to analyse
+    roi = 'Foie'
+
     # ----- Patient -----
     # Creating patient object
     patient = Patient()
 
-    # tkinter
-    app = TkFOR(patient, 'Foie')
-    app.mainloop()
+    # ----- Creating multiple choice box  -----
+    # Multiple Choice
+    to_do_now, to_do_after, _ = patient.sort_acquisitions(roi)
+
+    # Creating easyguiBox
+    msgbox_title = "Recherche des fiduciels"
+    msgbox_txt = "Sur quelles acquisitions souhaitez-vous lancer la recherche de fiduciels?" \
+                 "\n\n-> Le foie doit avoir été contouré sur l'acquisition 4D 50% (à défaut la 4D 30%)" \
+                 "\n-> Possibilité de choisir plusieurs acquisitions dont l'IRM Dixon"
+    images_to_process = multchoicebox(msgbox_txt, msgbox_title, to_do_now + to_do_after)
+
+    # ----- Fidu creation  -----
+
+    for im in images_to_process:
+        fid = Fidu(str(im), roi)
+        if fid.case.Examinations[im].EquipmentInfo.Modality == 'CT':
+            fid.look_for_fidu()
+        elif fid.case.Examinations[im].EquipmentInfo.Modality == 'MR':
+            fid.look_in_irm()
+
+    # fid_irm = Fidu(image, self.roi)
+    #
+
+    # try:
+    #     fid_irm.look_in_irm(self.roi)
+    # except:
+    # # tkinter
+    # app = TkFOR(patient, 'Foie')
+    # app.mainloop()
