@@ -8,8 +8,10 @@ from connect import *
 from skimage.draw import polygon2mask
 from skimage.feature import peak_local_max
 from skimage.filters import gaussian
-
+import cv2
+import PIL
 from easygui import *
+from pathlib import Path
 
 
 # todo : use the center of mass and not only the maximum
@@ -37,6 +39,65 @@ def get_bounding_box(case, examination, roi):
     bound = case.PatientModel.StructureSets[examination].RoiGeometries[roi].GetBoundingBox()
     bounds = [[bound[0]['x'], bound[0]['y'], bound[0]['z']], [bound[1]['x'], bound[1]['y'], bound[1]['z']]]
     return bounds
+
+
+def create_PIL_image_from_npy(img, scale=4):
+    # image normalization between 0 an 1
+    img[img <= -400] = -400
+    img[img >= 2000] = 2000
+    img = (img + abs(img.min()))
+    img = img / img.max()
+    img = img * 255
+    img = np.array(img, dtype=np.uint8)
+
+    # create PIL object
+    im = PIL.Image.fromarray(img)
+    # im.convert('L')
+
+    # resize
+    width, height = im.size
+    newsize = (scale * width, scale * height)
+    im = im.resize(newsize)
+
+    return im
+
+
+def add_background(img, factor, strip_size, value=0):
+    background_size = factor * 2 + strip_size
+    background = np.ones([background_size, background_size]) * value
+    size_img = img.shape
+    indent1 = int(background_size / 2 - (size_img[0] / 2))
+    indent2 = int(background_size / 2 - (size_img[1] / 2))
+
+    from_to_1 = range(indent1, indent1 + size_img[0] + 1, 1)
+    print(f'from_to_1  : {from_to_1}')
+    from_to_2 = range(indent2, indent2 + size_img[1] + 1, 1)
+    print(f'from_to_2  : {from_to_2}')
+
+    background[from_to_1[0]:from_to_1[-1]:1, from_to_2[0]:from_to_2[-1]:1] = img[:, :]
+    return background
+
+
+def create_npy_thumbnails(npy_arr, coords, factor=100, stripe_size=30):
+    f = factor
+    i, j, k = coords
+
+    si, sj, sk = npy_arr.shape
+
+    img_ax = npy_arr[i,
+             max(0, j - f): min(sj, j + f),
+             max(0, k - f): min(sk, k + f)]
+    print(f'img_ax  : {img_ax.shape}')
+    img_ax = add_background(img_ax, f, stripe_size, 0)
+
+    # todo: check if necessary to go reverse for i
+    img_sag = npy_arr[min(i + f, si):max(0, i - f): - 1,
+              min(j + f, sj): max(j - f, 0):-1,
+              k]
+    print(f'img_sag  : {img_sag.shape}')
+    img_sag = add_background(img_sag, f, stripe_size, 0)
+
+    return img_ax, img_sag
 
 
 # ----------------------------------------------------
@@ -303,23 +364,8 @@ class Image(Patient):
                                              RbeCellTypeName=None, RoiMaterial=None)
 
         self.case.PatientModel.RegionsOfInterest['External'].CreateExternalGeometry(
-            Examination=self.case.Examinations[self.dixon_name],
-            ThresholdLevel=15)
+            Examination=self.case.Examinations[self.exam_name], ThresholdLevel=15)
 
-        # if '%' in image and compteur == 0:
-        #     compteur += 1
-        #     self.main_exam = str(image)
-        #     fid_irm = Fidu(image, self.roi)
-        #     try:
-        #         fid_irm.look_in_irm(self.roi)
-        #     except:
-        #         print("Impossible de trouver les fidus sur l'irm. Voir logs")
-    # def generate_drr(self):
-    #     ANGLES = [120, 90, 60]
-    #     SAD = 600
-    #     SDD = 1100
-    #     GANTRYAXIS = [1, 0, 0]
-    #     INPLANEANGLE = -90
 
 
 class Fidu(Image):
@@ -448,38 +494,69 @@ class Fidu(Image):
             # todo: check if hist[2] is needed or not
             if hist[0] > 0:  # and (hist[2] < 100):
                 print("-> La tache numéro : " + str(index + 1) + " contient des artefacts!\n")
-                coord_new.append(coord)
+                auto_result = True
             else:
-                thrown_away.append(coord)
+                auto_result = False
+
+            # Adding some manual decision
+            if auto_result:
+                msg = "L'algorithme pense que c'est un fiduciel. Est ce réellement le cas?" \
+                      "\n\n-> Attention: il peut d'agir d'un artefact" \
+                      "\n-> Si le fiduciel est dédoublé, cliquer sur 'Dédoublé'"
+            else:
+                msg = "' ------------------------------------- /!\'" \
+                      "L'algorithme pense que ce n'est PAS un fiduciel. Est ce réellement le cas?" \
+                      "\n-> Si le fiduciel est dédoublé, cliquer sur 'Dédoublé'"
 
             ###############################################
             # cv2 imshow
             ###############################################
-            # creating image
-            # img = self.image_to_process[i - 3 * s:i + 3 * s, j - 3 * s: j + 3 * s, k]
-            # print(img.min())
-            # img = (img + img.min())
-            # img = img / img.max()
-            # img = img * 255
-            # img = np.array(img, dtype=np.uint8)
-            #
-            # scale_percent = 2000  # percent of original size
-            # width = int(img.shape[1] * scale_percent / 100)
-            # height = int(img.shape[0] * scale_percent / 100)
-            # dim = (width, height)
-            #
-            # # resize image
-            # resized = cv2.resize(img, dim, interpolation=cv2.INTER_AREA)
-            #
-            # directory = r"\\Client\X$\DEV\Fiduciels\images"
-            # filename = str(self.patient_id) + '_' + self.case.CaseName + '_' + str(index) + '.jpg'
-            # print(filename)
-            #
-            # cv.imwrite(os.path.join(directory, filename), img)
-            #
-            # cv.imshow("Est-ce un fiduciel?", resized)
-            # cv.waitKey(0)
 
+            # creating images from numpy arrays
+            factor = 80  # number of voxel surrounding the central voxel (how width is the thumbnail image)
+            stripe_size = 20
+
+            img_ax, img_sag = create_npy_thumbnails(self.image_npy, coords=coord, factor=factor,
+                                                    stripe_size=stripe_size)
+
+            # img = np.concatenate((img_ax, blank, im_sag), axis=1)  #with central rectangle
+            img = np.concatenate((img_ax, img_sag), axis=1)
+
+            # converting npy array to image (0->255 , scaling it, etc.)
+            scale = 3  # enlarging factor (for more comfortable viewing)
+            im_to_save = create_PIL_image_from_npy(img, scale=scale)
+
+            directory = r"\\Client\X$\DEV\Fiduciels\images"
+            filename = str(self.patient_id + '_' + str(i) + str(j) + str(k) + '_' + str(index) + '.png')
+            filename.replace("\\", "_")  # in case the name is xxx\xxx
+            filename.replace("/", "_")
+            filename.replace(" ", "")
+
+            im_path = os.path.join(directory, filename)
+
+            # if the file already exists, delete it
+            path = Path(im_path)
+            if path.is_file():
+                path.unlink()
+
+            # saving image
+            im_to_save.save(im_path)
+
+            # easyGUI message
+            choices = ["C'est un fidu", "Ce n'est PAS un fidu", "Dédoublé"]
+            reply = buttonbox(msg, image=im_path, choices=choices)
+
+            if reply == "C'est un fidu":
+                coord_new.append(coord)
+            elif reply == "Ce n'est PAS un fidu":
+                thrown_away.append(coord)
+            elif reply == "Dédoublé":
+                thrown_away.append(coord)
+            # # Final decision
+            # if auto_result:
+            #     coord_new.append(coord)
+            # else:
+            #     thrown_away.append(coord)
         return coord_new, thrown_away
 
     def get_position_from_coordinates(self, coordinates):
@@ -512,7 +589,7 @@ class Fidu(Image):
             self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[name].Point = {
                 'x': x, 'y': z, 'z': y}
 
-    def look_in_irm(self):
+    def look_in_irm(self, main_exam):
 
         # Roi inside which one is looking for the fidus (usually -> 'Foie')
         input_roi = self.roi_name
@@ -520,35 +597,36 @@ class Fidu(Image):
         # The Name of DIXON IRM is self.dixon_name
         # 1- ones needs to register IRM and CT and to copy little boxes centered to the fidu and copy them to the IRM
 
-        self.get_dixon_name()
+        # self.get_dixon_name()
 
         # External Creation on dixon acquisition
+
         self.create_IRM_external()
 
         # Setting CT as primary
-        self.case.Examinations[self.exam_name].SetPrimary()
-        self.case.Examinations[self.dixon_name].SetSecondary()
+        self.case.Examinations[main_exam].SetPrimary()
+        self.case.Examinations[self.exam_name].SetSecondary()
 
         # Rigid registration between IRM and CT
-        self.rigid_registration(self.dixon_name, self.exam_name, self.roi_name)
+        self.rigid_registration(self.exam_name, main_exam, self.roi_name)
 
         # Creating little spheres
-        coord, roi_list = self.create_sphere_roi()
+        coord, roi_list = self.create_sphere_roi(main_exam)
 
         # Copying Rois one by one
         for roi_name in roi_list:
             print(roi_name)
             print(self.exam_name)
-            self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi_name)
+            self.copy_roi(source=main_exam, target=self.exam_name, roi=roi_name)
 
         # Copy of the liver roi
-        self.copy_roi(source=self.exam_name, target=self.dixon_name, roi=roi)
+        self.copy_roi(source=main_exam, target=self.exam_name, roi=self.roi_name)
 
         # -------------------------------------------------------
         # FIDU CREATION
         # -------------------------------------------------------
         # Creating a Fidu object with dixon image as main exam attribute
-        obj_irm = Fidu(self.dixon_name)
+        obj_irm = Fidu(self.exam_name)
         # Creating an ITK image and then an associated numpy array
         image_irm = obj_irm.get_itk_image()
         img_npy = sitk.GetArrayFromImage(image_irm)
@@ -605,15 +683,15 @@ class Fidu(Image):
                                                 InitializeImages=True,
                                                 FocusRoisNames=[focus_roi])
 
-    def create_sphere_roi(self):
+    def create_sphere_roi(self,main_exam):
         """ poi is a part of case.PatientModel.PointsOfInterest"""
         coordinates, roi_list = [], []
         for poi in self.case.PatientModel.PointsOfInterest:
             # Work only with the fidus named 'Fidu 1" etc.
             if self.fidu_prefix_names in poi.Name:
-                x = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.x
-                y = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.y
-                z = self.case.PatientModel.StructureSets[self.exam_name].PoiGeometries[poi.Name].Point.z
+                x = self.case.PatientModel.StructureSets[main_exam].PoiGeometries[poi.Name].Point.x
+                y = self.case.PatientModel.StructureSets[main_exam].PoiGeometries[poi.Name].Point.y
+                z = self.case.PatientModel.StructureSets[main_exam].PoiGeometries[poi.Name].Point.z
                 coordinates.append([x, y, z])
                 roi_name = poi.Name + '_roi'
                 roi_list.append(roi_name)
@@ -625,7 +703,7 @@ class Fidu(Image):
                     print(f'{roi_name} already exists!')
 
                 self.case.PatientModel.RegionsOfInterest[roi_name].CreateSphereGeometry(
-                    Radius=self.radius, Examination=self.case.Examinations[self.exam_name],
+                    Radius=self.radius, Examination=self.case.Examinations[main_exam],
                     Center={'x': x, 'y': y, 'z': z}, Representation="TriangleMesh", VoxelSize=None)
         return coordinates, roi_list
 
@@ -668,151 +746,6 @@ class Fidu(Image):
         res.UpdateDerivedGeometry(Examination=self.examination, Algorithm="Auto")
 
 
-class TkFOR(tkinter.Tk):
-    def __init__(self, patient_object, roi):
-
-        tkinter.Tk.__init__(self)
-
-        self.roi = roi
-        self.patient = patient_object
-        self.list = self.patient.get_ct_list()
-        self.main_exam = None
-        self.examDict = {}
-        self.roi_list = []
-
-        self.IRM_detection = IntVar()
-        self.__createDict()
-        self.__createWidgets()
-
-    def __createDict(self):
-
-        # first sorting
-        for exam in self.list:
-            self.examDict[exam] = IntVar()
-
-    def __execute(self):
-        compteur = 0
-        kept_in_mind = []
-        for image in self.examDict:
-
-            if self.examDict[image].get() == 1:
-                fid = Fidu(str(image), self.roi)
-
-                # Recherche des fiduciels dans les CT
-                # If a detection is not possible (no roi contoured), one keeps in mind the exam name -> res
-                res, self.roi_list = fid.look_for_fidu()
-
-                if res:
-                    kept_in_mind.append(res)
-                # -----------------------------------------------------
-                # Recherche des fiduciels dans l'IRM à partir du CT 4D
-                # -----------------------------------------------------
-                # if the irm was already registered, it's not done an other time
-                if '%' in image and compteur == 0:
-                    compteur += 1
-                    self.main_exam = str(image)
-                    fid_irm = Fidu(image, self.roi)
-                    try:
-                        fid_irm.look_in_irm(self.roi)
-                    except:
-                        print("Impossible de trouver les fidus sur l'irm. Voir logs")
-
-        for image in kept_in_mind:
-            try:
-                print(f'main exam {self.main_exam}')
-                print(f'kept in mind {image}')
-
-                fid = Fidu(str(image), self.roi)
-
-                fid.rigid_registration(floating_exam=image, reference_exam=self.main_exam, focus_roi=self.roi)
-                fid.copy_roi(source=self.main_exam, target=image, roi=self.roi)
-                fid.look_for_fidu()
-
-            except:
-                print('problem with kept in mind')
-
-        # todo: remettre les delete
-        # todo: trouver un moyen de recaler
-        self.quit()
-
-    def __end(self):
-        self.quit()
-
-    def __createWidgets(self):
-        # width = 200
-        rowNumber = 0
-        columnNumber = 0
-        rowNumberMax = 15
-
-        # Objects creation
-        self.title("Recherche de fiduciels")
-
-        self.label = Label(self, text="Choisir le/les CTS à analyser\n (NB: le Foie doit être contouré sur un scan "
-                                      "4D) \n",
-                           font=('Arial', '16'))
-        self.label.grid(row=0, column=0, columnspan=(len(self.list) // rowNumberMax + 1))
-
-        compteur = 0
-        for image in self.examDict:
-            rowNumber += 1
-            columnNumber = columnNumber + rowNumber // rowNumberMax
-
-            if has_contour(self.patient.case, image, self.roi) and not any(
-                    word in image.lower() for word in ['dosi', '1mm']):
-                color = 'red'
-                size = "12"
-                txt = '-> Examen de référence : ' + str(image)
-
-                # # primary or secondary setting for registration
-                # print(f'Setting {image} as primary')
-                # self.patient.case.Examinations[image].SetPrimary()
-
-            elif has_contour(self.patient.case, image, self.roi) and ("%" not in image) and (
-                    "dosi" not in image.lower()) and ("1mm" not in image.lower()):
-                color = 'red'
-                size = "12"
-                txt = '-> Foie contouré (calcul rapide) : ' + str(image)
-                compteur += 1
-
-                # print(f'Setting {image} as secondary')
-                # self.patient.case.Examinations[image].SetSecondary()
-
-            elif compteur == 0 and (any(word in image.lower() for word in ['tard', 'port', 'arter']) or not has_contour(
-                    self.patient.case, image, self.roi)):
-                compteur += 1
-                color = 'green'
-                size = "12"
-                txt = '-> Conseillé : ' + str(image)
-
-            elif "dosi" in image.lower() or "1mm" in image.lower():
-                color = 'grey'
-                size = "8"
-                txt = '-> Déconseillé : ' + str(image)
-
-            elif not (has_contour(self.patient.case, image, self.roi)) and ("%" in image):
-                color = 'grey'
-                size = "8"
-                txt = '-> Impossible : ' + str(image)
-
-            else:
-                color = 'black'
-                size = "9"
-                txt = str(image)
-
-            if (rowNumber // rowNumberMax) != 0:
-                rowNumber = 1
-
-            self.checkbutton = Checkbutton(self, text=txt, variable=self.examDict[image], onvalue=1, offvalue=0,
-                                           justify="center", font=('Arial', size), fg=color)
-            self.checkbutton.grid(column=columnNumber, row=rowNumber, sticky=W, padx=20)
-
-        self.runButton = Button(self, text='Recherche des fiduciels', command=self.__execute)
-        self.runButton.grid(column=columnNumber, row=rowNumberMax, sticky=E, padx=80, pady=4)
-
-        self.cancelButton = Button(self, text='Annuler', command=self.__end)
-        self.cancelButton.grid(column=columnNumber, row=rowNumberMax, sticky=E, padx=10, pady=4)
-
-
 if __name__ == '__main__':
     # roi to analyse
     roi = 'Foie'
@@ -834,19 +767,46 @@ if __name__ == '__main__':
 
     # ----- Fidu creation  -----
 
-    for im in images_to_process:
-        fid = Fidu(str(im), roi)
-        if fid.case.Examinations[im].EquipmentInfo.Modality == 'CT':
-            fid.look_for_fidu()
-        elif fid.case.Examinations[im].EquipmentInfo.Modality == 'MR':
-            fid.look_in_irm()
+    fid_objects = [Fidu(str(im), roi) for im in images_to_process]
+    print(fid_objects)
+    modalities = [fid_objects[index].case.Examinations[im].EquipmentInfo.Modality for index, im in enumerate
+    (images_to_process)]  # incredible onelining. Don't ask
+    print(modalities)
+    contoured = [has_contour(fid_objects[index].case, str(im), roi) for index, im in enumerate
+    (images_to_process)]
+    print(contoured)
 
-    # fid_irm = Fidu(image, self.roi)
-    #
+    already_done = []
+    main_exam = to_do_now[0]
+    was_main_exam_done = fid_objects[0].case.PatientModel.StructureSets[main_exam].PoiGeometries.Count
+    for index, im in enumerate(images_to_process):
+        nb = fid_objects[index].case.PatientModel.StructureSets[im].PoiGeometries.Count
+        if nb > 0:
+            already_done.append(True)
+        else:
+            already_done.append(False)
 
-    # try:
-    #     fid_irm.look_in_irm(self.roi)
-    # except:
-    # # tkinter
-    # app = TkFOR(patient, 'Foie')
-    # app.mainloop()
+    for index, im in enumerate(images_to_process):
+        modality = modalities[index]
+        contour = contoured[index]
+        fid_object = fid_objects[index]
+
+        if modality == 'CT':
+            if contour:
+                main_exam = im
+                fid_object.look_for_fidu()
+            else:
+                fid_object.rigid_registration(floating_exam=im, reference_exam=main_exam, focus_roi=roi)
+                fid_object.copy_roi(source=main_exam, target=im, roi=roi)
+                fid_object.look_for_fidu()
+
+        elif modality == 'MR':
+
+            if was_main_exam_done:
+                fid_object.look_in_irm(main_exam)
+
+            else:
+                fid = Fidu(str(main_exam), roi)
+                fid.look_for_fidu()  # do first the main exam
+                was_main_exam_done = True
+                fid_object.look_in_irm(main_exam)
