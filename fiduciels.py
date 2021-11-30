@@ -8,16 +8,22 @@ from connect import *
 from skimage.draw import polygon2mask
 from skimage.feature import peak_local_max
 from skimage.filters import gaussian
-import cv2
-import PIL
+
 from easygui import *
 from pathlib import Path
+from PIL import Image, ImageDraw
 
 
 # todo : use the center of mass and not only the maximum
 # ----------------------------------------------------
 # Functions
 # ----------------------------------------------------
+def get_concat_h(im1, im2):
+    dst = Image.new('RGB', (im1.width + im2.width, im1.height))
+    dst.paste(im1, (0, 0))
+    dst.paste(im2, (im1.width, 0))
+    return dst
+
 
 def check_roi(case, roi_to_check):
     # this method checks if a toi exists
@@ -51,7 +57,7 @@ def create_PIL_image_from_npy(img, scale=4):
     img = np.array(img, dtype=np.uint8)
 
     # create PIL object
-    im = PIL.Image.fromarray(img)
+    im = Image.fromarray(img)
     # im.convert('L')
 
     # resize
@@ -100,6 +106,18 @@ def create_npy_thumbnails(npy_arr, coords, factor=100, stripe_size=30):
     return img_ax, img_sag
 
 
+def warning_msg():
+    msg = "Attention: ce script réalise une sauvegarde automatique du dossier.\n" \
+          "\n- tous les recalages seront supprimés" \
+          "\n- les frames of reference seront dissociés\n" \
+          "\nCliquer sur Continue pour sauvegarder le dossier et continuer."
+    title = "Script fiduciels"
+    if ccbox(msg, title):  # show a Continue/Cancel dialog
+        pass  # user chose Continue
+    else:  # user chose Cancel
+        sys.exit(0)
+
+
 # ----------------------------------------------------
 # Classes
 # ----------------------------------------------------
@@ -135,10 +153,12 @@ class Patient:
 
     def get_dixon_name(self):
         irm_list = self.get_irm_list()
-        for irm_modality in irm_list:
-            if "DIXON" in irm_modality[1]:
-                self.dixon_name.append(irm_modality[0])
-                print(irm_modality[0])
+        for irm in irm_list:
+            irm_name = irm[0]
+            irm_modality = irm[1]
+            if "DIXON" in irm_modality and "RESPI LIBRE GADO TARDIF" in irm_modality:
+                self.dixon_name.append(irm_name)
+                print(irm_name)
         return self.dixon_name
 
     def get_roi_list(self):
@@ -152,7 +172,7 @@ class Patient:
         description = description.__getitem__("SeriesDescription")
         return description
 
-    def sort_acquisitions(self, roi):
+    def sort_acquisitions(self, roi, ref, secondary, forbidden):
         """This method takes all the acquisition names and sorts them
             - to do = images of interest containing a roi contour
             - to do after = images of interest without contour
@@ -181,21 +201,19 @@ class Patient:
         # STARTING THE REAL LOOP
         new_images = images[index:]
         for image in new_images:
-            if has_contour(self.case, image, self.roi) and not any(
-                    word in image.lower() for word in ['dosi', '1mm']):
+            print(f'image sorting ... {image}')
+            if has_contour(self.case, image, self.roi) \
+                    and any(word in image.lower() for word in ref):
+                # and not any(word in image.lower() for word in forbidden)
                 # to_do_now.append((image, self.get_description(image)))
                 to_do_now.append(image)
 
-            elif has_contour(self.case, image, self.roi) and ("%" not in image) and (
-                    "dosi" not in image.lower()) and ("1mm" not in image.lower()):
-                # to_do_now.append((image, self.get_description(image)))
-                to_do_now.append(image)
+            # elif has_contour(self.case, image, self.roi) and ("%" not in image) and (
+            #         "dosi" not in image.lower()) and ("1mm" not in image.lower()):
+            #     # to_do_now.append((image, self.get_description(image)))
+            #     to_do_now.append(image)
 
-            elif any(word in image.lower() for word in ['tard', 'port', 'arter', 'inj']):
-                # to_do_after.append((image, self.get_description(image)))
-                to_do_after.append(image)
-
-            elif any(word in image.lower() for word in ['tard', 'port', 'arter', 'inj']):
+            elif any(word in image.lower() for word in secondary):
                 # to_do_after.append((image, self.get_description(image)))
                 to_do_after.append(image)
 
@@ -210,7 +228,7 @@ class Patient:
         return to_do_now, to_do_after, not_to_do
 
 
-class Image(Patient):
+class Images(Patient):
     def __init__(self, exam_name, roi_name=None):
         super().__init__()
         self.exam_name = exam_name
@@ -218,7 +236,7 @@ class Image(Patient):
         self.n_data = self.data.size
         self.n_voxels = int(self.n_data / 2)
 
-        # Image Shape
+        # Images Shape
         self.rows = self.case.Examinations[self.exam_name].Series[0].ImageStack.NrPixels.x
         self.columns = self.case.Examinations[self.exam_name].Series[0].ImageStack.NrPixels.y
         self.depth = int(self.n_data / 2 / self.rows / self.columns)
@@ -244,7 +262,7 @@ class Image(Patient):
                           row_direction_x, row_direction_y, row_direction_z,
                           slice_direction_x, slice_direction_y, slice_direction_z)
 
-        # Image Corners
+        # Images Corners
         self.x_corner = self.case.Examinations[self.exam_name].Series[0].ImageStack.Corner.x
         self.y_corner = self.case.Examinations[self.exam_name].Series[0].ImageStack.Corner.y
         self.z_corner = self.case.Examinations[self.exam_name].Series[0].ImageStack.Corner.z
@@ -260,7 +278,7 @@ class Image(Patient):
             0].ImageStack.ConversionParameters.RescaleIntercept
         self.slope = self.case.Examinations[self.exam_name].Series[0].ImageStack.ConversionParameters.RescaleSlope
 
-        # Image Creation
+        # Images Creation
         # BE CAREFUL : the first axis is inf/sup in numpy format
         self.image_itk = None
         self.image_npy = None
@@ -274,6 +292,21 @@ class Image(Patient):
         # # name of the dixon IRM
         # self.dixon_name = None
         # # self.get_dixon_name()
+
+        # Change frame of reference
+        # self.change_frame_of_reference()
+
+    def change_frame_of_reference(self):
+        # removing existing registration
+        n_reg = self.case.Registrations.Count
+        if n_reg:
+            for reg in range(n_reg):
+                floating = self.case.Registrations[reg].FromFrameOfReference
+                reference = self.case.Registrations[reg].ToFrameOfReference
+                self.case.RemoveRegistration(FloatingFrameOfReference=floating,
+                                             ReferenceFrameOfReference=reference)
+        self.patient.Save()
+        self.case.Examinations[self.exam_name].AssignToNewFrameOfReference()
 
     def get_itk_image(self):
         """Return a simpleITK image object"""
@@ -303,7 +336,7 @@ class Image(Patient):
         # This method needs a roi_name
         if roi_name is None:
             if self.roi_name is None:
-                raise Exception("Please, give a roi name to the Image Object if you want to use this method")
+                raise Exception("Please, give a roi name to the Images Object if you want to use this method")
         else:
             self.roi_name = roi_name
 
@@ -367,8 +400,7 @@ class Image(Patient):
             Examination=self.case.Examinations[self.exam_name], ThresholdLevel=15)
 
 
-
-class Fidu(Image):
+class Fidu(Images):
     def __init__(self, exam_name, roi_name=None, threshold_abs=None, threshold_relative=None):
         super().__init__(exam_name, roi_name)
 
@@ -421,7 +453,7 @@ class Fidu(Image):
             print('---------------------------------------')
             print(f'\nRECHERCHE DE FIDU POUR --> {self.exam_name}\n')
             print('---------------------------------------')
-            # Image Creation
+            # Images Creation
             # BE CAREFUL : the first axis is inf/sup in numpy format
             self.image_itk = self.get_itk_image()
             self.image_npy = sitk.GetArrayFromImage(self.image_itk)
@@ -478,7 +510,6 @@ class Fidu(Image):
 
     def post_processing(self, coordinates):
 
-        # todo : modifier le post processing pour recherche dans une sphere
         print("\nPost processing (looking for artefacts)...")
         s = self.fidu_size
         coord_new = []
@@ -491,14 +522,14 @@ class Fidu(Image):
             hist, bin_edges = np.histogram(matrix, bins=[-1500, -200, self.threshold_value, self.maximum])
             print(hist)
 
-            # todo: check if hist[2] is needed or not
             if hist[0] > 0:  # and (hist[2] < 100):
                 print("-> La tache numéro : " + str(index + 1) + " contient des artefacts!\n")
                 auto_result = True
             else:
                 auto_result = False
+                continue
 
-            # Adding some manual decision
+                # Adding some manual decision
             if auto_result:
                 msg = "L'algorithme pense que c'est un fiduciel. Est ce réellement le cas?" \
                       "\n\n-> Attention: il peut d'agir d'un artefact" \
@@ -508,10 +539,6 @@ class Fidu(Image):
                       "L'algorithme pense que ce n'est PAS un fiduciel. Est ce réellement le cas?" \
                       "\n-> Si le fiduciel est dédoublé, cliquer sur 'Dédoublé'"
 
-            ###############################################
-            # cv2 imshow
-            ###############################################
-
             # creating images from numpy arrays
             factor = 80  # number of voxel surrounding the central voxel (how width is the thumbnail image)
             stripe_size = 20
@@ -519,12 +546,34 @@ class Fidu(Image):
             img_ax, img_sag = create_npy_thumbnails(self.image_npy, coords=coord, factor=factor,
                                                     stripe_size=stripe_size)
 
-            # img = np.concatenate((img_ax, blank, im_sag), axis=1)  #with central rectangle
-            img = np.concatenate((img_ax, img_sag), axis=1)
+            method1 = False
+            if method1:
+                # img = np.concatenate((img_ax, blank, im_sag), axis=1)  #with central rectangle
+                img = np.concatenate((img_ax, img_sag), axis=1)
+                # converting npy array to image (0->255 , scaling it, etc.)
+                scale = 3  # enlarging factor (for more comfortable viewing)
+                im_to_save = create_PIL_image_from_npy(img, scale=scale)
 
-            # converting npy array to image (0->255 , scaling it, etc.)
-            scale = 3  # enlarging factor (for more comfortable viewing)
-            im_to_save = create_PIL_image_from_npy(img, scale=scale)
+            else:
+                scale = 3
+                d = 40  # half size of the rectangle
+
+                im1 = create_PIL_image_from_npy(img_ax, scale=scale)
+                im2 = create_PIL_image_from_npy(img_sag, scale=scale)
+                x, y = im1.size
+                x0 = x / 2 - d
+                x1 = x / 2 + d
+
+                # im1.convert('RGB')
+                # im2.convert('RGB')
+
+                draw = ImageDraw.Draw(im1)
+                draw2 = ImageDraw.Draw(im2)
+
+                draw.ellipse([(x0, x0), (x1, x1)], outline='red', width=5)
+                draw2.ellipse([(x0, x0), (x1, x1)], outline='red', width=5)
+
+                im_to_save = get_concat_h(im1, im2)
 
             directory = r"\\Client\X$\DEV\Fiduciels\images"
             filename = str(self.patient_id + '_' + str(i) + str(j) + str(k) + '_' + str(index) + '.png')
@@ -683,7 +732,8 @@ class Fidu(Image):
                                                 InitializeImages=True,
                                                 FocusRoisNames=[focus_roi])
 
-    def create_sphere_roi(self,main_exam):
+    def create_sphere_roi(self, main_exam):
+
         """ poi is a part of case.PatientModel.PointsOfInterest"""
         coordinates, roi_list = [], []
         for poi in self.case.PatientModel.PointsOfInterest:
@@ -747,6 +797,9 @@ class Fidu(Image):
 
 
 if __name__ == '__main__':
+
+    warning_msg()
+
     # roi to analyse
     roi = 'Foie'
 
@@ -756,7 +809,12 @@ if __name__ == '__main__':
 
     # ----- Creating multiple choice box  -----
     # Multiple Choice
-    to_do_now, to_do_after, _ = patient.sort_acquisitions(roi)
+    ref_acquisition = ("resp", "bloque", "mid", "ventilation")
+    secondary_injected_acquisition = ('tard', 'port', 'arter', 'inj')
+    forbidden_words = ('dosi', '1mm')
+
+    to_do_now, to_do_after, _ = patient.sort_acquisitions(roi, ref_acquisition, secondary_injected_acquisition,
+                                                          forbidden_words)
 
     # Creating easyguiBox
     msgbox_title = "Recherche des fiduciels"
@@ -766,15 +824,17 @@ if __name__ == '__main__':
     images_to_process = multchoicebox(msgbox_txt, msgbox_title, to_do_now + to_do_after)
 
     # ----- Fidu creation  -----
-
+    # creating some lists containing all the informations needed
     fid_objects = [Fidu(str(im), roi) for im in images_to_process]
-    print(fid_objects)
-    modalities = [fid_objects[index].case.Examinations[im].EquipmentInfo.Modality for index, im in enumerate
-    (images_to_process)]  # incredible onelining. Don't ask
-    print(modalities)
-    contoured = [has_contour(fid_objects[index].case, str(im), roi) for index, im in enumerate
-    (images_to_process)]
-    print(contoured)
+    modalities = [fid_objects[index].case.Examinations[im].EquipmentInfo.Modality for index, im in enumerate \
+        (images_to_process)]  # incredible onelining. Don't ask
+    contoured = [has_contour(fid_objects[index].case, str(im), roi) for index, im in enumerate \
+        (images_to_process)]
+    frames_of_reference = [fid_objects[index].case.Examinations[im].EquipmentInfo.FrameOfReference for index, im in enumerate \
+        (images_to_process)]
+
+    values, counts = np.unique(frames_of_reference, return_counts=True)
+    print(values,counts)
 
     already_done = []
     main_exam = to_do_now[0]
@@ -792,16 +852,22 @@ if __name__ == '__main__':
         fid_object = fid_objects[index]
 
         if modality == 'CT':
+            # If the roi of interest already exists, just look for fidus
             if contour:
                 main_exam = im
                 fid_object.look_for_fidu()
+            # If the roi does not exist, one have to copy it from an other registered exam
             else:
+                # First doing the registration
                 fid_object.rigid_registration(floating_exam=im, reference_exam=main_exam, focus_roi=roi)
+                # Then copying the roi
                 fid_object.copy_roi(source=main_exam, target=im, roi=roi)
+                # Finally, looking for fidus
                 fid_object.look_for_fidu()
 
         elif modality == 'MR':
-
+            # in order to achieve the search of fidus on MR image, one needs to have already found them on the main
+            # CT scan. If not (else condition), one starts searching on the main exam
             if was_main_exam_done:
                 fid_object.look_in_irm(main_exam)
 
