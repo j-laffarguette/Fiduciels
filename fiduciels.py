@@ -132,7 +132,6 @@ class Patient:
         self.irm_names = []
         self.roi_list = []
         self.dixon_name = []
-        self.get_dixon_name()
         self.patient_id = self.patient.PatientID
         self.roi = None
 
@@ -187,9 +186,9 @@ class Patient:
         to_do_after = []
         not_to_do = []
 
-        # Au début, je fais une premiere boucle for pour trier les CT. Pour que le CT 50% soit le premier de la
-        # liste, tant que ce n'est pas lui, je fais passer les autres CT en fin de liste. La nouvelle recherche se
-        # fera avec lui en premier
+        # Au début, je fais une premiere boucle for pour trier les CT afin que le premier CT soit un CT contenant une
+        # strucutre non vide , je fais passer les autres CT en fin de liste. La nouvelle recherche se fera avec lui
+        # en premier
 
         index = 0
         for index, image in enumerate(images):
@@ -197,21 +196,17 @@ class Patient:
                 images.append(image)
             else:
                 break
+        new_images = images[index:]
 
         # STARTING THE REAL LOOP
-        new_images = images[index:]
         for image in new_images:
             print(f'image sorting ... {image}')
+
             if has_contour(self.case, image, self.roi) \
                     and any(word in image.lower() for word in ref):
                 # and not any(word in image.lower() for word in forbidden)
                 # to_do_now.append((image, self.get_description(image)))
                 to_do_now.append(image)
-
-            # elif has_contour(self.case, image, self.roi) and ("%" not in image) and (
-            #         "dosi" not in image.lower()) and ("1mm" not in image.lower()):
-            #     # to_do_now.append((image, self.get_description(image)))
-            #     to_do_now.append(image)
 
             elif any(word in image.lower() for word in secondary):
                 # to_do_after.append((image, self.get_description(image)))
@@ -221,7 +216,14 @@ class Patient:
                 # not_to_do.append((image, self.get_description(image)))
                 not_to_do.append(image)
 
+        # it is possible that there is no image at all in to_do_now (no Ct with a good name). So, to be sure the
+        # script works, one chooses to use a to_do_after containing a contour
+        if not to_do_now:  # if it is empty
+            to_do_now.append(to_do_after[0])
+            del to_do_after[0]
+
         # at the end, if there are mri's, we take them
+        self.get_dixon_name()
         if self.dixon_name:
             for dixon in self.dixon_name:
                 to_do_after.append(dixon)
@@ -830,11 +832,12 @@ if __name__ == '__main__':
         (images_to_process)]  # incredible onelining. Don't ask
     contoured = [has_contour(fid_objects[index].case, str(im), roi) for index, im in enumerate \
         (images_to_process)]
-    frames_of_reference = [fid_objects[index].case.Examinations[im].EquipmentInfo.FrameOfReference for index, im in enumerate \
-        (images_to_process)]
+    frames_of_reference = [fid_objects[index].case.Examinations[im].EquipmentInfo.FrameOfReference for index, im in
+                           enumerate \
+                               (images_to_process)]
 
     values, counts = np.unique(frames_of_reference, return_counts=True)
-    print(values,counts)
+    print(values, counts)
 
     already_done = []
     main_exam = to_do_now[0]
